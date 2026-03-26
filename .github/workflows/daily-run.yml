@@ -25,7 +25,7 @@ jobs:
         run: uv python install
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync
 
       - name: Start daily run
         env:
