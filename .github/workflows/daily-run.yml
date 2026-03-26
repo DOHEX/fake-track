@@ -1,0 +1,37 @@
+name: Daily Campus Run
+
+on:
+  schedule:
+    # GitHub Actions cron uses UTC. 22:30 UTC = 06:30 China time (UTC+8).
+    - cron: "30 22 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-campus-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.15"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Start daily run
+        env:
+          FAKE_TRACK_KEY: ${{ secrets.FAKE_TRACK_KEY }}
+          FAKE_TRACK_PHONE: ${{ secrets.FAKE_TRACK_PHONE }}
+          FAKE_TRACK_PASSWORD: ${{ secrets.FAKE_TRACK_PASSWORD }}
+        run: uv run fake-track run
