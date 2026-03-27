@@ -24,3 +24,8 @@ build-backend = "uv_build"
 
 [tool.ruff.lint]
 select = ["I"]
+
+[dependency-groups]
+dev = [
+    "prek>=0.3.8",
+]
