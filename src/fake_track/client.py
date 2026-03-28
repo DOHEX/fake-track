@@ -23,34 +23,45 @@ class CampusRunClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.session = requests.Session()
-        self.session_id = "1111"
+        self.session_id = ""
 
     def _build_url(self, endpoint: str) -> str:
         endpoint = endpoint.strip()
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        if endpoint.startswith(("http://", "https://")):
             return endpoint
-        if endpoint.startswith("xcxtapi/"):
-            return f"{self.settings.base_url_root}/{endpoint}"
-        if endpoint.startswith("/"):
-            return f"{self.settings.base_url_xcxapi}{endpoint}"
-        if "xcxtapi" in endpoint:
-            return f"{self.settings.base_url_root}/{endpoint}"
-        return f"{self.settings.base_url_xcxapi}/{endpoint}"
+
+        normalized = endpoint.strip("/")
+        if normalized.startswith("xcxtapi/"):
+            return f"{self.settings.base_url_root}/{normalized}"
+        return f"{self.settings.base_url_xcxapi}/{normalized}"
 
     def _headers(self) -> dict[str, str]:
         return {
             "Content-Type": "application/json",
             "Authorization": "",
-            "X-Session-ID": self.session_id or "1111",
+            "X-Session-ID": self.session_id,
             "charset": "utf-8",
             "Referer": self.settings.referer,
             "User-Agent": self.settings.user_agent,
         }
 
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            return True
+        if isinstance(exc, requests.HTTPError):
+            response = getattr(exc, "response", None)
+            return response is not None and int(response.status_code) >= 500
+        return False
+
     def _request(
-        self, method: str, endpoint: str, payload: dict | None = None
+        self,
+        method: str,
+        endpoint: str,
+        payload: dict | None = None,
     ) -> ApiResponse:
         url = self._build_url(endpoint)
+        method_upper = method.upper()
         last_error: Exception | None = None
 
         for attempt in range(1, self.settings.retry_count + 1):
@@ -59,38 +70,54 @@ class CampusRunClient:
                     "headers": self._headers(),
                     "timeout": self.settings.timeout_sec,
                 }
-                if method.upper() == "GET":
+                if method_upper == "GET":
                     kwargs["params"] = payload or {}
                 else:
                     kwargs["json"] = payload or {}
 
-                resp = self.session.request(method=method.upper(), url=url, **kwargs)
-                resp.raise_for_status()
-                body = resp.json()
-                if "sessionid" in self.session.cookies:
-                    self.session_id = self.session.cookies.get(
-                        "sessionid", self.session_id
+                response = self.session.request(method=method_upper, url=url, **kwargs)
+                if response.status_code >= 500:
+                    response.raise_for_status()
+                if response.status_code >= 400:
+                    raise ApiError(
+                        f"HTTP {response.status_code} for {endpoint}: {response.text[:200]}"
                     )
 
+                try:
+                    body = response.json()
+                except ValueError as exc:
+                    raise ApiError(f"Invalid JSON response from {endpoint}") from exc
+
+                cookie_session = self.session.cookies.get("sessionid")
+                if cookie_session:
+                    self.session_id = cookie_session
+
                 code = int(body.get("code", 0))
-                msg = str(body.get("message") or body.get("msg") or "")
+                message = str(body.get("message") or body.get("msg") or "")
                 data = body.get("data")
+
                 if code == -2:
                     raise ApiError("Session invalid (code=-2)")
                 if code != 1:
-                    raise ApiError(msg or f"API error code={code} endpoint={endpoint}")
-                return ApiResponse(code=code, message=msg, data=data, raw=body)
+                    raise ApiError(
+                        message or f"API error code={code} endpoint={endpoint}"
+                    )
+                return ApiResponse(code=code, message=message, data=data, raw=body)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                if attempt >= self.settings.retry_count:
+                if (
+                    attempt >= self.settings.retry_count
+                    or not self._is_retryable_exception(exc)
+                ):
                     break
-                sleep_sec = 1.2**attempt
-                time.sleep(sleep_sec)
+                time.sleep(1.2**attempt)
 
+        if isinstance(last_error, ApiError):
+            raise last_error
         raise ApiError(f"Request failed for {endpoint}: {last_error}")
 
-    def login(self) -> ApiResponse:
-        result = self._request(
+    def authenticate_user(self) -> ApiResponse:
+        response = self._request(
             "POST",
             "/userLogin/",
             {
@@ -98,38 +125,46 @@ class CampusRunClient:
                 "password": self.settings.password,
             },
         )
-        if isinstance(result.data, dict):
-            self.session_id = str(result.data.get("session_keys") or self.session_id)
-        return result
+        if isinstance(response.data, dict):
+            session_key = response.data.get("session_keys")
+            if session_key:
+                self.session_id = str(session_key)
+        return response
 
-    def rand_run_info(self, lat: float, lng: float) -> ApiResponse:
+    def fetch_route_points(self, lat: float, lng: float) -> ApiResponse:
         return self._request(
-            "GET", "xcxtapi/activity/randrunInfo", {"lat": lat, "lng": lng}
+            "GET",
+            "xcxtapi/activity/randrunInfo",
+            {"lat": lat, "lng": lng},
         )
 
-    def create_line(self, student_id: int, pass_point: list[dict]) -> ApiResponse:
+    def create_run_record(
+        self, student_id: int, pass_points: list[dict]
+    ) -> ApiResponse:
         return self._request(
             "POST",
             "/createLine/",
             {
                 "student_id": student_id,
-                "pass_point": pass_point,
+                "pass_point": pass_points,
             },
         )
 
-    def check_record(self, encrypted_a: str) -> ApiResponse:
-        return self._request("POST", "/checkRecord/", {"a": encrypted_a})
+    def validate_run_payload(self, encrypted_payload: str) -> ApiResponse:
+        return self._request("POST", "/checkRecord/", {"a": encrypted_payload})
 
-    def update_record(self, encrypted_a: str) -> ApiResponse:
-        return self._request("POST", "/updateRecordNew/", {"a": encrypted_a})
+    def submit_run_summary(self, encrypted_payload: str) -> ApiResponse:
+        return self._request("POST", "/updateRecordNew/", {"a": encrypted_payload})
 
-    def upload_path_points(self, encrypted_img_url: str) -> ApiResponse:
+    def upload_path_batch(self, encrypted_batch_payload: str) -> ApiResponse:
         return self._request(
-            "POST", "/uploadPathPointV3/", {"img_url": encrypted_img_url}
+            "POST",
+            "/uploadPathPointV3/",
+            {"img_url": encrypted_batch_payload},
         )
 
-    def record_info(self, record_id: int) -> ApiResponse:
+    def fetch_record_info(self, record_id: int) -> ApiResponse:
         return self._request("GET", "/recordInfo/", {"id": record_id})
 
-    def get_path_points(self, record_id: int) -> ApiResponse:
+    def fetch_path_points(self, record_id: int) -> ApiResponse:
         return self._request("GET", "/GetPathPoints/", {"record_id": record_id})

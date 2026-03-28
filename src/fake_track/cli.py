@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 import typer
@@ -11,8 +12,13 @@ from .config import ConfigError, Settings
 from .crypto import aes_encrypt
 from .workflow import RunDebugOptions, RunWorkflow
 
-app = typer.Typer(help="fack-track campus run API test tool")
+app = typer.Typer(help="fake-track campus run API test tool")
 console = Console()
+
+
+class RunMode(str, Enum):
+    full = "full"
+    connectivity = "connectivity"
 
 
 @app.command()
@@ -26,7 +32,7 @@ def encrypt(
 
 @app.command("run")
 def run_once(
-    mode: str = typer.Option("full", help="full or connectivity"),
+    mode: RunMode = typer.Option(RunMode.full, help="full or connectivity"),
     force: bool = typer.Option(
         False,
         "--force",
@@ -76,7 +82,7 @@ def run_once(
         console.print(f"[cyan][{stamp}][/cyan] {message}")
 
     try:
-        if mode == "connectivity":
+        if mode is RunMode.connectivity:
             report = workflow.run_connectivity(progress=progress)
         else:
             report = workflow.run_full(

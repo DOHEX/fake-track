@@ -9,16 +9,20 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "cryptography>=46.0.6",
+    "osmnx>=2.1.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
     "rich>=13.9.4",
     "requests>=2.32.3",
     "typer>=0.24.1",
+    "matplotlib>=3.10.8",
 ]
 
 [project.scripts]
 fake-track = "fake_track.cli:app"
 
 [build-system]
-requires = ["uv_build>=0.10.6,<0.11.0"]
+requires = ["uv_build>=0.11.2,<0.12"]
 build-backend = "uv_build"
 
 [tool.ruff.lint]

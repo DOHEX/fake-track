@@ -1,105 +1,53 @@
-import binascii
-import struct
-import xml.etree.ElementTree as ET
-import zlib
+from dataclasses import dataclass
 from pathlib import Path
 
-from .track import TrackPoint
+import matplotlib
+import osmnx as ox
+
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt
+
+from .models import TrackPoint
 
 
-def _png_chunk(tag: bytes, data: bytes) -> bytes:
-    return (
-        struct.pack("!I", len(data))
-        + tag
-        + data
-        + struct.pack("!I", binascii.crc32(tag + data) & 0xFFFFFFFF)
-    )
+@dataclass(frozen=True, slots=True)
+class EdgeStyle:
+    color: str
+    width: float
 
 
-def _write_png_rgb(path: Path, width: int, height: int, pixels: bytearray) -> None:
-    raw = bytearray()
-    stride = width * 3
-    for y in range(height):
-        raw.append(0)
-        row_start = y * stride
-        raw.extend(pixels[row_start : row_start + stride])
-
-    png = bytearray(b"\x89PNG\r\n\x1a\n")
-    png.extend(
-        _png_chunk(
-            b"IHDR",
-            struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0),
-        )
-    )
-    png.extend(_png_chunk(b"IDAT", zlib.compress(bytes(raw), level=9)))
-    png.extend(_png_chunk(b"IEND", b""))
-    path.write_bytes(png)
+_EDGE_STYLE_BY_HIGHWAY: dict[str, EdgeStyle] = {
+    "motorway": EdgeStyle("#1D3557", 1.6),
+    "trunk": EdgeStyle("#1D3557", 1.6),
+    "primary": EdgeStyle("#457B9D", 1.4),
+    "secondary": EdgeStyle("#4D908E", 1.2),
+    "tertiary": EdgeStyle("#43AA8B", 1.1),
+    "residential": EdgeStyle("#577590", 1.0),
+    "living_street": EdgeStyle("#90BE6D", 1.0),
+    "service": EdgeStyle("#F8961E", 0.9),
+    "footway": EdgeStyle("#F3722C", 0.8),
+    "path": EdgeStyle("#F94144", 0.8),
+    "cycleway": EdgeStyle("#277DA1", 0.9),
+    "steps": EdgeStyle("#F9844A", 0.8),
+}
+_DEFAULT_EDGE_STYLE = EdgeStyle("#6C757D", 0.8)
 
 
-def _set_pixel(
-    pixels: bytearray,
-    width: int,
-    height: int,
-    x: int,
-    y: int,
-    color: tuple[int, int, int],
-) -> None:
-    if 0 <= x < width and 0 <= y < height:
-        idx = (y * width + x) * 3
-        pixels[idx : idx + 3] = bytes(color)
+def _normalize_highway_type(raw: object) -> str | None:
+    if isinstance(raw, (list, tuple)):
+        if not raw:
+            return None
+        raw = raw[0]
+    if raw is None:
+        return None
+    return str(raw)
 
 
-def _draw_line(
-    pixels: bytearray,
-    width: int,
-    height: int,
-    x0: int,
-    y0: int,
-    x1: int,
-    y1: int,
-    color: tuple[int, int, int],
-    thickness: int = 1,
-) -> None:
-    dx = abs(x1 - x0)
-    sx = 1 if x0 < x1 else -1
-    dy = -abs(y1 - y0)
-    sy = 1 if y0 < y1 else -1
-    err = dx + dy
-
-    while True:
-        for ox in range(-thickness + 1, thickness):
-            for oy in range(-thickness + 1, thickness):
-                _set_pixel(pixels, width, height, x0 + ox, y0 + oy, color)
-
-        if x0 == x1 and y0 == y1:
-            break
-
-        e2 = 2 * err
-        if e2 >= dy:
-            err += dy
-            x0 += sx
-        if e2 <= dx:
-            err += dx
-            y0 += sy
+def _resolve_edge_style(highway_type: str | None) -> EdgeStyle:
+    return _EDGE_STYLE_BY_HIGHWAY.get(highway_type or "", _DEFAULT_EDGE_STYLE)
 
 
-def _draw_circle(
-    pixels: bytearray,
-    width: int,
-    height: int,
-    cx: int,
-    cy: int,
-    radius: int,
-    color: tuple[int, int, int],
-) -> None:
-    r2 = radius * radius
-    for dx in range(-radius, radius + 1):
-        for dy in range(-radius, radius + 1):
-            if dx * dx + dy * dy <= r2:
-                _set_pixel(pixels, width, height, cx + dx, cy + dy, color)
-
-
-def save_track_overlay_png(
+def render_track_overlay_png(
     map_path: str,
     points: list[TrackPoint],
     output_path: str,
@@ -112,121 +60,82 @@ def save_track_overlay_png(
     if not osm_file.exists() or not osm_file.is_file():
         raise FileNotFoundError(f"Map file not found: {map_path}")
 
-    root = ET.parse(osm_file).getroot()
+    try:
+        graph = ox.graph_from_xml(str(osm_file), simplify=False, retain_all=True)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"No highway geometry found in map: {map_path}") from exc
 
-    nodes: dict[str, tuple[float, float]] = {}
-    for node in root.findall("node"):
-        node_id = node.get("id")
-        lat = node.get("lat")
-        lon = node.get("lon")
-        if node_id is None or lat is None or lon is None:
-            continue
-        try:
-            nodes[node_id] = (float(lat), float(lon))
-        except ValueError:
-            continue
+    if graph.number_of_nodes() == 0 or graph.number_of_edges() == 0:
+        raise ValueError(f"No highway geometry found in map: {map_path}")
 
-    ways: list[tuple[list[tuple[float, float]], str | None]] = []
-    geo_points: list[tuple[float, float]] = []
+    edge_colors: list[str] = []
+    edge_widths: list[float] = []
+    for _u, _v, _k, data in graph.edges(keys=True, data=True):
+        style = _resolve_edge_style(_normalize_highway_type(data.get("highway")))
+        edge_colors.append(style.color)
+        edge_widths.append(style.width)
 
-    for way in root.findall("way"):
-        refs = [nd.get("ref") for nd in way.findall("nd") if nd.get("ref") in nodes]
-        if len(refs) < 2:
-            continue
+    fig, ax = ox.plot_graph(
+        graph,
+        node_size=0,
+        edge_color=edge_colors,
+        edge_linewidth=edge_widths,
+        bgcolor="#f5f7fa",
+        show=False,
+        close=False,
+    )
 
-        htype = None
-        for tag in way.findall("tag"):
-            if tag.get("k") == "highway":
-                htype = tag.get("v")
-                break
+    track_lats = [point.latitude for point in points]
+    track_lons = [point.longitude for point in points]
+    ax.plot(track_lons, track_lats, color="#DE3036", linewidth=2.8, zorder=4)
 
-        coords = [nodes[ref] for ref in refs if ref is not None]
-        ways.append((coords, htype))
-        geo_points.extend(coords)
-
-    track_geo = [(pt.latitude, pt.longitude) for pt in points]
-    geo_points.extend(track_geo)
-
-    must_pass_geo: list[tuple[float, float]] = []
     if must_pass_points:
+        pass_lats: list[float] = []
+        pass_lons: list[float] = []
         for item in must_pass_points:
             try:
-                must_pass_geo.append((float(item["lat"]), float(item["lng"])))
+                pass_lats.append(float(item["lat"]))
+                pass_lons.append(float(item["lng"]))
             except KeyError, TypeError, ValueError:
                 continue
-    geo_points.extend(must_pass_geo)
+        if pass_lats and pass_lons:
+            ax.scatter(
+                pass_lons,
+                pass_lats,
+                s=26,
+                color="#FFC700",
+                edgecolors="#A16207",
+                linewidths=0.4,
+                zorder=5,
+            )
 
-    if not geo_points:
-        raise ValueError("No geometry found to render")
+    ax.scatter(
+        [points[0].longitude],
+        [points[0].latitude],
+        s=36,
+        color="#16A34A",
+        edgecolors="#FFFFFF",
+        linewidths=0.6,
+        zorder=6,
+    )
+    ax.scatter(
+        [points[-1].longitude],
+        [points[-1].latitude],
+        s=36,
+        color="#DC2626",
+        edgecolors="#FFFFFF",
+        linewidths=0.6,
+        zorder=6,
+    )
 
-    lats = [p[0] for p in geo_points]
-    lons = [p[1] for p in geo_points]
-    min_lat, max_lat = min(lats), max(lats)
-    min_lon, max_lon = min(lons), max(lons)
-
-    width = 1500
-    height = 1500
-    pad = 50
-
-    bg_color = (245, 247, 250)
-    road_colors = {
-        "motorway": (29, 53, 87),
-        "trunk": (29, 53, 87),
-        "primary": (69, 123, 157),
-        "secondary": (77, 144, 142),
-        "tertiary": (67, 170, 139),
-        "residential": (87, 117, 144),
-        "living_street": (144, 190, 109),
-        "service": (248, 150, 30),
-        "footway": (243, 114, 44),
-        "path": (249, 65, 68),
-        "cycleway": (39, 125, 161),
-        "steps": (249, 132, 74),
-    }
-
-    pixels = bytearray(bg_color * (width * height))
-
-    def to_xy(lat: float, lon: float) -> tuple[int, int]:
-        lon_span = max(1e-12, max_lon - min_lon)
-        lat_span = max(1e-12, max_lat - min_lat)
-        xr = (lon - min_lon) / lon_span
-        yr = (lat - min_lat) / lat_span
-        x = int(pad + xr * (width - 1 - 2 * pad))
-        y = int((height - 1 - pad) - yr * (height - 1 - 2 * pad))
-        return x, y
-
-    for coords, htype in ways:
-        color = road_colors.get(htype, (108, 117, 125))
-        thickness = 1
-        if htype in {
-            "primary",
-            "secondary",
-            "tertiary",
-            "residential",
-            "living_street",
-        }:
-            thickness = 2
-        for a, b in zip(coords, coords[1:]):
-            x0, y0 = to_xy(a[0], a[1])
-            x1, y1 = to_xy(b[0], b[1])
-            _draw_line(pixels, width, height, x0, y0, x1, y1, color, thickness)
-
-    for a, b in zip(track_geo, track_geo[1:]):
-        x0, y0 = to_xy(a[0], a[1])
-        x1, y1 = to_xy(b[0], b[1])
-        _draw_line(pixels, width, height, x0, y0, x1, y1, (222, 48, 54), 3)
-
-    if must_pass_geo:
-        for lat, lon in must_pass_geo:
-            x, y = to_xy(lat, lon)
-            _draw_circle(pixels, width, height, x, y, 4, (255, 199, 0))
-
-    sx, sy = to_xy(track_geo[0][0], track_geo[0][1])
-    ex, ey = to_xy(track_geo[-1][0], track_geo[-1][1])
-    _draw_circle(pixels, width, height, sx, sy, 5, (22, 163, 74))
-    _draw_circle(pixels, width, height, ex, ey, 5, (220, 38, 38))
-
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _write_png_rgb(out, width, height, pixels)
-    return str(out.resolve())
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output,
+        dpi=220,
+        facecolor="#f5f7fa",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+    plt.close(fig)
+    return str(output.resolve())
