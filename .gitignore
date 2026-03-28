@@ -11,7 +11,7 @@ wheels/
 
 dev
 *cache
-.env*
+.env
 
 *.lock
 
