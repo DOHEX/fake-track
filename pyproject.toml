@@ -1,7 +1,7 @@
 [project]
 name = "fake-track"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "华理校园跑调试工具"
 readme = "README.md"
 authors = [
     { name = "DOHEX", email = "dohex@outlook.com" }
@@ -16,7 +16,6 @@ dependencies = [
 
 [project.scripts]
 fake-track = "fake_track.cli:app"
-fack-track = "fake_track.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]

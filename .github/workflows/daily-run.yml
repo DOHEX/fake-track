@@ -4,7 +4,7 @@ on:
   schedule:
     # 晨跑 22:05 UTC = 06:05 China time (UTC+8).
     - cron: "5 22 * * *"
-    # 普跑 06:37 UTC = 14:37 China time (UTC+8).
+    # 普跑 06:00 UTC = 14:00 China time (UTC+8).
     - cron: "00 6 * * *"
   workflow_dispatch:
 

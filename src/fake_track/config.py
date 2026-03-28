@@ -65,6 +65,20 @@ def _get_int_env_any(names: tuple[str, ...], default: int) -> int:
     return default
 
 
+def _get_bool_env_any(names: tuple[str, ...], default: bool) -> bool:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            continue
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        raise ConfigError(f"Invalid boolean for {name}: {raw}")
+    return default
+
+
 @dataclass(slots=True)
 class Settings:
     phone: str
@@ -93,22 +107,16 @@ class Settings:
     point_jitter_m: float = 2.5
     timestamp_jitter_ms: int = 220
 
+    road_routing_enabled: bool = True
+    road_map_path: str = "map.osm"
+    road_snap_max_m: float = 120.0
+    road_coordinate_bridge_enabled: bool = True
+
     distance_jitter_ratio: float = 0.03
     pace_jitter_ratio: float = 0.08
 
     timeout_sec: int = 20
     retry_count: int = 3
-    batch_size: int = 50
-
-    upload_interval_mode: str = "fast"
-    upload_realtime_scale: float = 1.0
-    upload_realtime_jitter_ratio: float = 0.12
-    upload_fast_min_delay_sec: float = 0.06
-    upload_fast_max_delay_sec: float = 0.14
-
-    submit_wait_mode: str = "duration"
-    submit_wait_scale: float = 1.0
-    submit_wait_jitter_sec: int = 6
 
     report_path: str | None = None
 
@@ -117,176 +125,94 @@ class Settings:
         _load_env_file_if_present(Path(".env"))
         _load_env_file_if_present(Path(".env.local"))
 
-        run_key = _get_required_env(
-            ("FACK_TRACK_KEY", "FAKE_TRACK_KEY", "FAKE_TRACK_SECRET")
-        )
+        run_key = _get_required_env(("FAKE_TRACK_KEY", "FAKE_TRACK_SECRET"))
         if len(run_key.encode("utf-8")) not in {16, 24, 32}:
-            raise ConfigError("FACK_TRACK_KEY must be 16/24/32 bytes for AES")
+            raise ConfigError("FAKE_TRACK_KEY must be 16/24/32 bytes for AES")
 
         return cls(
-            phone=_get_required_env(("FACK_TRACK_PHONE", "FAKE_TRACK_PHONE")),
-            password=_get_required_env(("FACK_TRACK_PASSWORD", "FAKE_TRACK_PASSWORD")),
+            phone=_get_required_env(("FAKE_TRACK_PHONE",)),
+            password=_get_required_env(("FAKE_TRACK_PASSWORD",)),
             run_key=run_key,
             base_url_xcxapi=(
-                _get_first_env(
-                    ("FACK_TRACK_BASE_URL_XCXAPI", "FAKE_TRACK_BASE_URL_XCXAPI")
-                )
+                _get_first_env(("FAKE_TRACK_BASE_URL_XCXAPI",))
                 or "https://run.ecust.edu.cn/xcxapi"
             ).rstrip("/"),
             base_url_root=(
-                _get_first_env(("FACK_TRACK_BASE_URL_ROOT", "FAKE_TRACK_BASE_URL_ROOT"))
+                _get_first_env(("FAKE_TRACK_BASE_URL_ROOT",))
                 or "https://run.ecust.edu.cn"
             ).rstrip("/"),
             referer=(
-                _get_first_env(("FACK_TRACK_REFERER", "FAKE_TRACK_REFERER"))
+                _get_first_env(("FAKE_TRACK_REFERER",))
                 or "https://servicewechat.com/wxfa4e6078551d719e/49/page-frame.html"
             ),
             user_agent=(
-                _get_first_env(("FACK_TRACK_USER_AGENT", "FAKE_TRACK_USER_AGENT"))
+                _get_first_env(("FAKE_TRACK_USER_AGENT",))
                 or "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Mobile Safari/537.36 MicroMessenger"
             ),
-            start_lat=_get_float_env_any(
-                ("FACK_TRACK_START_LAT", "FAKE_TRACK_START_LAT"), 30.83378
-            ),
-            start_lng=_get_float_env_any(
-                ("FACK_TRACK_START_LNG", "FAKE_TRACK_START_LNG"), 121.504532
-            ),
+            start_lat=_get_float_env_any(("FAKE_TRACK_START_LAT",), 30.83378),
+            start_lng=_get_float_env_any(("FAKE_TRACK_START_LNG",), 121.504532),
             target_distance_km=_get_float_env_any(
-                ("FACK_TRACK_TARGET_DISTANCE_KM", "FAKE_TRACK_TARGET_DISTANCE_KM"),
+                ("FAKE_TRACK_TARGET_DISTANCE_KM",),
                 2.03,
             ),
             target_pace_min_per_km=_get_float_env_any(
-                (
-                    "FACK_TRACK_TARGET_PACE_MIN_PER_KM",
-                    "FAKE_TRACK_TARGET_PACE_MIN_PER_KM",
-                ),
+                ("FAKE_TRACK_TARGET_PACE_MIN_PER_KM",),
                 6.0,
             ),
             target_duration_min_sec=_get_int_env_any(
-                (
-                    "FACK_TRACK_TARGET_DURATION_MIN_SEC",
-                    "FAKE_TRACK_TARGET_DURATION_MIN_SEC",
-                ),
+                ("FAKE_TRACK_TARGET_DURATION_MIN_SEC",),
                 460,
             ),
             target_duration_max_sec=_get_int_env_any(
-                (
-                    "FACK_TRACK_TARGET_DURATION_MAX_SEC",
-                    "FAKE_TRACK_TARGET_DURATION_MAX_SEC",
-                ),
+                ("FAKE_TRACK_TARGET_DURATION_MAX_SEC",),
                 490,
             ),
             sample_interval_sec=_get_int_env_any(
-                ("FACK_TRACK_SAMPLE_INTERVAL_SEC", "FAKE_TRACK_SAMPLE_INTERVAL_SEC"),
-                1,
+                ("FAKE_TRACK_SAMPLE_INTERVAL_SEC",), 1
             ),
             must_pass_radius_km=_get_float_env_any(
-                ("FACK_TRACK_MUST_PASS_RADIUS_KM", "FAKE_TRACK_MUST_PASS_RADIUS_KM"),
+                ("FAKE_TRACK_MUST_PASS_RADIUS_KM",),
                 0.05,
             ),
             compensation_factor=_get_float_env_any(
-                ("FACK_TRACK_COMPENSATION_FACTOR", "FAKE_TRACK_COMPENSATION_FACTOR"),
+                ("FAKE_TRACK_COMPENSATION_FACTOR",),
                 1.0,
             ),
             point_accuracy_min=_get_int_env_any(
-                ("FACK_TRACK_POINT_ACCURACY_MIN", "FAKE_TRACK_POINT_ACCURACY_MIN"),
+                ("FAKE_TRACK_POINT_ACCURACY_MIN",),
                 8,
             ),
             point_accuracy_max=_get_int_env_any(
-                ("FACK_TRACK_POINT_ACCURACY_MAX", "FAKE_TRACK_POINT_ACCURACY_MAX"),
+                ("FAKE_TRACK_POINT_ACCURACY_MAX",),
                 25,
             ),
-            point_jitter_m=_get_float_env_any(
-                ("FACK_TRACK_POINT_JITTER_M", "FAKE_TRACK_POINT_JITTER_M"), 2.5
-            ),
+            point_jitter_m=_get_float_env_any(("FAKE_TRACK_POINT_JITTER_M",), 2.5),
             timestamp_jitter_ms=_get_int_env_any(
-                ("FACK_TRACK_TIMESTAMP_JITTER_MS", "FAKE_TRACK_TIMESTAMP_JITTER_MS"),
+                ("FAKE_TRACK_TIMESTAMP_JITTER_MS",),
                 220,
             ),
+            road_routing_enabled=_get_bool_env_any(
+                ("FAKE_TRACK_ROAD_ROUTING_ENABLED",),
+                True,
+            ),
+            road_map_path=(_get_first_env(("FAKE_TRACK_ROAD_MAP_PATH",)) or "map.osm"),
+            road_snap_max_m=_get_float_env_any(
+                ("FAKE_TRACK_ROAD_SNAP_MAX_M",),
+                120.0,
+            ),
+            road_coordinate_bridge_enabled=_get_bool_env_any(
+                ("FAKE_TRACK_ROAD_COORDINATE_BRIDGE_ENABLED",),
+                True,
+            ),
             distance_jitter_ratio=_get_float_env_any(
-                (
-                    "FACK_TRACK_DISTANCE_JITTER_RATIO",
-                    "FAKE_TRACK_DISTANCE_JITTER_RATIO",
-                ),
+                ("FAKE_TRACK_DISTANCE_JITTER_RATIO",),
                 0.03,
             ),
             pace_jitter_ratio=_get_float_env_any(
-                ("FACK_TRACK_PACE_JITTER_RATIO", "FAKE_TRACK_PACE_JITTER_RATIO"),
-                0.08,
+                ("FAKE_TRACK_PACE_JITTER_RATIO",), 0.08
             ),
-            timeout_sec=_get_int_env_any(
-                ("FACK_TRACK_TIMEOUT_SEC", "FAKE_TRACK_TIMEOUT_SEC"), 20
-            ),
-            retry_count=_get_int_env_any(
-                ("FACK_TRACK_RETRY_COUNT", "FAKE_TRACK_RETRY_COUNT"), 3
-            ),
-            batch_size=_get_int_env_any(
-                ("FACK_TRACK_BATCH_SIZE", "FAKE_TRACK_BATCH_SIZE"), 50
-            ),
-            upload_interval_mode=(
-                _get_first_env(
-                    (
-                        "FACK_TRACK_UPLOAD_INTERVAL_MODE",
-                        "FAKE_TRACK_UPLOAD_INTERVAL_MODE",
-                    )
-                )
-                or "fast"
-            )
-            .strip()
-            .lower(),
-            upload_realtime_scale=_get_float_env_any(
-                (
-                    "FACK_TRACK_UPLOAD_REALTIME_SCALE",
-                    "FAKE_TRACK_UPLOAD_REALTIME_SCALE",
-                ),
-                1.0,
-            ),
-            upload_realtime_jitter_ratio=_get_float_env_any(
-                (
-                    "FACK_TRACK_UPLOAD_REALTIME_JITTER_RATIO",
-                    "FAKE_TRACK_UPLOAD_REALTIME_JITTER_RATIO",
-                ),
-                0.12,
-            ),
-            upload_fast_min_delay_sec=_get_float_env_any(
-                (
-                    "FACK_TRACK_UPLOAD_FAST_MIN_DELAY_SEC",
-                    "FAKE_TRACK_UPLOAD_FAST_MIN_DELAY_SEC",
-                ),
-                0.06,
-            ),
-            upload_fast_max_delay_sec=_get_float_env_any(
-                (
-                    "FACK_TRACK_UPLOAD_FAST_MAX_DELAY_SEC",
-                    "FAKE_TRACK_UPLOAD_FAST_MAX_DELAY_SEC",
-                ),
-                0.14,
-            ),
-            submit_wait_mode=(
-                _get_first_env(
-                    (
-                        "FACK_TRACK_SUBMIT_WAIT_MODE",
-                        "FAKE_TRACK_SUBMIT_WAIT_MODE",
-                    )
-                )
-                or "duration"
-            )
-            .strip()
-            .lower(),
-            submit_wait_scale=_get_float_env_any(
-                ("FACK_TRACK_SUBMIT_WAIT_SCALE", "FAKE_TRACK_SUBMIT_WAIT_SCALE"),
-                1.0,
-            ),
-            submit_wait_jitter_sec=_get_int_env_any(
-                (
-                    "FACK_TRACK_SUBMIT_WAIT_JITTER_SEC",
-                    "FAKE_TRACK_SUBMIT_WAIT_JITTER_SEC",
-                ),
-                6,
-            ),
-            report_path=_get_first_env(
-                ("FACK_TRACK_REPORT_PATH", "FAKE_TRACK_REPORT_PATH")
-            )
-            or None,
+            timeout_sec=_get_int_env_any(("FAKE_TRACK_TIMEOUT_SEC",), 20),
+            retry_count=_get_int_env_any(("FAKE_TRACK_RETRY_COUNT",), 3),
+            report_path=_get_first_env(("FAKE_TRACK_REPORT_PATH",)) or None,
         )

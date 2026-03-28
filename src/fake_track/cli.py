@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from pathlib import Path
 
 import typer
 from rich import box
@@ -8,7 +9,7 @@ from rich.table import Table
 
 from .config import ConfigError, Settings
 from .crypto import aes_encrypt
-from .workflow import RunWorkflow
+from .workflow import RunDebugOptions, RunWorkflow
 
 app = typer.Typer(help="fack-track campus run API test tool")
 console = Console()
@@ -41,6 +42,14 @@ def run_once(
         "--json-output",
         help="Print full JSON report instead of concise summary.",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help=(
+            "Enable debug mode (skip submit wait and save debug track image to "
+            "dev/debug-images)."
+        ),
+    ),
 ) -> None:
     """Run one test cycle."""
     try:
@@ -49,7 +58,16 @@ def run_once(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
+    debug_image_path: str | None = None
+    if debug:
+        default_name = datetime.now().strftime("track-overlay-%Y%m%d-%H%M%S.png")
+        debug_image_path = str(Path("dev") / "debug-images" / default_name)
+
     workflow = RunWorkflow(settings)
+    debug_options = RunDebugOptions(
+        enabled=debug,
+        track_image_path=debug_image_path,
+    )
 
     def progress(message: str) -> None:
         if quiet:
@@ -61,7 +79,11 @@ def run_once(
         if mode == "connectivity":
             report = workflow.run_connectivity(progress=progress)
         else:
-            report = workflow.run_full(force=force, progress=progress)
+            report = workflow.run_full(
+                force=force,
+                progress=progress,
+                debug=debug_options,
+            )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]run failed:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -84,6 +106,10 @@ def run_once(
             "pace_min_per_km", str(summary.get("generated_pace_min_per_km", "-"))
         )
         table.add_row("uploaded_batches", str(summary.get("uploaded_batches", "-")))
+        if summary.get("generated_debug_track_image"):
+            table.add_row(
+                "debug_track_image", str(summary.get("generated_debug_track_image"))
+            )
 
     console.print(table)
     if report.warning:
