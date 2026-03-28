@@ -30,10 +30,14 @@ class CampusRunClient:
         if endpoint.startswith(("http://", "https://")):
             return endpoint
 
-        normalized = endpoint.strip("/")
-        if normalized.startswith("xcxtapi/"):
-            return f"{self.settings.base_url_root}/{normalized}"
-        return f"{self.settings.base_url_xcxapi}/{normalized}"
+        if endpoint.startswith("/"):
+            # Keep canonical trailing slash for Django-style endpoints.
+            return f"{self.settings.base_url_xcxapi}{endpoint}"
+
+        if endpoint.startswith("xcxtapi/"):
+            return f"{self.settings.base_url_root}/{endpoint}"
+
+        return f"{self.settings.base_url_xcxapi}/{endpoint}"
 
     def _headers(self) -> dict[str, str]:
         return {
