@@ -240,6 +240,61 @@ class RunWorkflow:
                 hits += 1
         return hits
 
+    @staticmethod
+    def _trailing_endpoint_cluster_ratio(points: list[TrackPoint]) -> float:
+        if len(points) < 2:
+            return 0.0
+
+        endpoint = points[-1]
+        clustered = 0
+        for point in reversed(points):
+            if (
+                haversine_km(
+                    point.latitude,
+                    point.longitude,
+                    endpoint.latitude,
+                    endpoint.longitude,
+                )
+                > 0.08
+            ):
+                break
+            clustered += 1
+        return clustered / len(points)
+
+    def _track_quality_issue(
+        self,
+        run_data: TrackBuildResult,
+        expected_pass_count: int,
+    ) -> str | None:
+        if run_data.must_pass_count < expected_pass_count:
+            return (
+                "pass-point guard failed: "
+                f"{run_data.must_pass_count}/{expected_pass_count} points hit"
+            )
+
+        raw_loss_km = run_data.raw_distance_km - run_data.confirmed_distance_km
+        if (
+            run_data.raw_distance_km > 0
+            and raw_loss_km > 0.25
+            and run_data.confirmed_distance_km / run_data.raw_distance_km < 0.72
+        ):
+            return (
+                "filter guard failed: confirmed distance lost "
+                f"{raw_loss_km:.2f}km from raw path"
+            )
+
+        endpoint_cluster_ratio = self._trailing_endpoint_cluster_ratio(run_data.points)
+        if (
+            endpoint_cluster_ratio > 0.16
+            and len(run_data.points) * endpoint_cluster_ratio > 60
+        ):
+            return (
+                "route-shape guard failed: "
+                f"{endpoint_cluster_ratio:.0%} of points cluster near endpoint"
+            )
+
+        return None
+
     def _resolve_compensation_factor(self) -> float:
         brand = (self.settings.device_brand or "").strip().lower()
         if not brand:
@@ -396,7 +451,7 @@ class RunWorkflow:
         limits: ServerRunLimits,
         plan: RunTargetPlan,
         progress: ProgressCallback | None,
-    ) -> tuple[TrackBuildResult, int, RunTargetPlan]:
+    ) -> tuple[TrackBuildResult, int, int, RunTargetPlan]:
         current_plan = plan
         run_data = self.track_generator.generate(
             self._build_generation_request(context, current_plan)
@@ -448,8 +503,13 @@ class RunWorkflow:
         distance_guard_attempts = 0
         while run_data.distance_km < distance_floor_km and distance_guard_attempts < 7:
             deficit_km = max(0.0, distance_floor_km - run_data.distance_km)
+            confirmed_ratio = run_data.confirmed_distance_km / max(
+                run_data.raw_distance_km, 1e-6
+            )
+            correction_km = deficit_km / max(0.55, min(1.05, confirmed_ratio))
             next_target_distance = current_plan.target_distance_km + max(
-                0.10, deficit_km * 1.4
+                0.06,
+                correction_km + 0.025,
             )
             distance_guard_attempts += 1
 
@@ -479,7 +539,43 @@ class RunWorkflow:
                 f"after {distance_guard_attempts} rebuilds"
             )
 
-        return run_data, distance_guard_attempts, current_plan
+        quality_guard_attempts = 0
+        expected_pass_count = len(context.pass_points)
+        quality_issue = self._track_quality_issue(run_data, expected_pass_count)
+        while quality_issue is not None and quality_guard_attempts < 3:
+            quality_guard_attempts += 1
+            next_target_distance = current_plan.target_distance_km + 0.04
+            self._emit(
+                progress,
+                (
+                    f"Quality guard {quality_guard_attempts}/3: "
+                    f"{quality_issue}; rebuild target {next_target_distance:.2f}km"
+                ),
+            )
+            current_plan = RunTargetPlan(
+                target_distance_km=next_target_distance,
+                target_pace_min_per_km=current_plan.target_pace_min_per_km,
+                target_duration_sec=current_plan.target_duration_sec,
+                distance_guard_min_km=current_plan.distance_guard_min_km,
+            )
+            run_data = self.track_generator.generate(
+                self._build_generation_request(context, current_plan)
+            )
+            if run_data.distance_km < distance_floor_km:
+                quality_issue = (
+                    "distance guard failed after quality rebuild: "
+                    f"{run_data.distance_km:.2f}km < {distance_floor_km:.2f}km"
+                )
+            else:
+                quality_issue = self._track_quality_issue(run_data, expected_pass_count)
+
+        if quality_issue is not None:
+            raise ApiError(
+                "Track generation failed quality guard: "
+                f"{quality_issue} after {quality_guard_attempts} rebuilds"
+            )
+
+        return run_data, distance_guard_attempts, quality_guard_attempts, current_plan
 
     def _wait_before_submit(
         self,
@@ -661,7 +757,7 @@ class RunWorkflow:
         )
 
         self._emit(progress, "Step 6/9: generate track")
-        run_data, distance_guard_attempts, final_plan = (
+        run_data, distance_guard_attempts, quality_guard_attempts, final_plan = (
             self._generate_track_with_guards(
                 context=context,
                 limits=limits,
@@ -775,6 +871,7 @@ class RunWorkflow:
                     final_plan.distance_guard_min_km, 4
                 ),
                 "generated_distance_guard_attempts": distance_guard_attempts,
+                "generated_quality_guard_attempts": quality_guard_attempts,
                 "generated_road_routing_used": run_data.road_routing_used,
                 "generated_coordinate_bridge_applied": context.coordinate_bridge_applied,
                 "generated_track_image_enabled": (

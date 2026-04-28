@@ -16,6 +16,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,6 +60,10 @@ jobs:
           MODE=$(jq -r '.mode // "unknown"' run-report.json)
           RECORD_ID=$(jq -r '.record_id // "-"' run-report.json)
           WARNING=$(jq -r '.warning // "-"' run-report.json)
+          RUN_TYPE=$(jq -r '.summary.run_type // "-"' run-report.json)
+          MORNING=$(jq -r '.summary.morning // "-"' run-report.json)
+          UNIVERSAL=$(jq -r '.summary.universal // "-"' run-report.json)
+          TARGET_EFFECTIVE=$(jq -r '.summary.target_effective // "-"' run-report.json)
           DISTANCE=$(jq -r '.summary.generated_distance_km // "-"' run-report.json)
           DURATION=$(jq -r '.summary.generated_duration_sec // "-"' run-report.json)
           BATCHES=$(jq -r '.summary.uploaded_batches // 0' run-report.json)
@@ -68,12 +74,16 @@ jobs:
           echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "uploaded_batches=$BATCHES" >> "$GITHUB_OUTPUT"
+          echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"
 
           {
             echo "## fake-track result"
             echo ""
             echo "- success: $SUCCESS"
             echo "- mode: $MODE"
+            echo "- timezone: $TZ"
+            echo "- run_type: $RUN_TYPE"
+            echo "- counts: morning=$MORNING universal=$UNIVERSAL target=$TARGET_EFFECTIVE"
             echo "- record_id: $RECORD_ID"
             echo "- distance_km: $DISTANCE"
             echo "- duration_sec: $DURATION"
@@ -101,7 +111,22 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ steps.result.outputs.mode }}" = "full" ] && [ "$BATCHES" -lt 1 ]; then
+          if [ "${{ steps.result.outputs.mode }}" = "skipped" ]; then
+            SKIP_REASON="${{ steps.result.outputs.skip_reason }}"
+            if [[ "$SKIP_REASON" == *"already met"* ]]; then
+              echo "Target already met; no run needed"
+              exit 0
+            fi
+            echo "Unexpected skipped run: $SKIP_REASON"
+            exit 1
+          fi
+
+          if [ "${{ steps.result.outputs.mode }}" != "full" ]; then
+            echo "Expected full or target-met skipped mode, got ${{ steps.result.outputs.mode }}"
+            exit 1
+          fi
+
+          if [ "$BATCHES" -lt 1 ]; then
             echo "Full run completed without uploaded batches"
             exit 1
           fi

@@ -126,6 +126,7 @@ uv run fake-track run --track-image --skip-wait
 - 若设置 FAKE_TRACK_REPORT_PATH，会写入完整 JSON 报告
 - 使用 --track-image 会额外输出轨迹叠加图
 - GitHub Actions 使用 --json-output 生成 run-report.json，并只把安全摘要写入 Step Summary
+- GitHub Actions 固定使用 Asia/Shanghai 时区；目标次数已满会自动 skipped 并通过，其他 skipped 会失败
 
 ## 开发
 

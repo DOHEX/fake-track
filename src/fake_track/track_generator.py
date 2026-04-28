@@ -24,6 +24,20 @@ class _RoadGraph:
     adjacency: dict[int, list[tuple[int, float]]]
 
 
+@dataclass(slots=True, frozen=True)
+class _RoadAnchor:
+    coord_index: int
+    node_id: int
+    progress_ratio: float
+
+
+@dataclass(slots=True, frozen=True)
+class _RoadDetour:
+    anchor: _RoadAnchor
+    nodes: tuple[int, ...]
+    distance_km: float
+
+
 def _linear_segment(
     start: tuple[float, float],
     end: tuple[float, float],
@@ -261,7 +275,14 @@ def _load_road_graph_cached(
     if osm_data is None:
         return None
 
-    adjacency: dict[int, list[tuple[int, float]]] = {}
+    edge_lengths: dict[int, dict[int, float]] = {}
+
+    def add_edge(node_a: int, node_b: int, distance_km: float) -> None:
+        neighbors = edge_lengths.setdefault(node_a, {})
+        previous = neighbors.get(node_b)
+        if previous is None or distance_km < previous:
+            neighbors[node_b] = distance_km
+
     for way in osm_data.ways:
         for node_a, node_b in zip(way.refs, way.refs[1:]):
             coord_a = osm_data.nodes[node_a]
@@ -269,12 +290,18 @@ def _load_road_graph_cached(
             dist_km = haversine_km(coord_a[0], coord_a[1], coord_b[0], coord_b[1])
             if dist_km <= 0.0:
                 continue
-            adjacency.setdefault(node_a, []).append((node_b, dist_km))
-            adjacency.setdefault(node_b, []).append((node_a, dist_km))
+            add_edge(node_a, node_b, dist_km)
+            add_edge(node_b, node_a, dist_km)
 
-    if not adjacency:
+    if not edge_lengths:
         return None
-    return _RoadGraph(nodes=osm_data.nodes, adjacency=adjacency)
+    adjacency = {
+        node_id: sorted(neighbors.items())
+        for node_id, neighbors in edge_lengths.items()
+        if neighbors
+    }
+    nodes = {node_id: osm_data.nodes[node_id] for node_id in adjacency}
+    return _RoadGraph(nodes=nodes, adjacency=adjacency)
 
 
 def _load_road_graph(map_path: str) -> _RoadGraph | None:
@@ -308,7 +335,13 @@ def _shortest_path_nodes(
     graph: _RoadGraph,
     start_id: int,
     end_id: int,
+    blocked_ids: set[int] | None = None,
+    max_distance_km: float | None = None,
 ) -> list[int] | None:
+    blocked = blocked_ids or set()
+    if start_id in blocked or end_id in blocked:
+        return None
+
     if start_id == end_id:
         return [start_id]
 
@@ -320,11 +353,17 @@ def _shortest_path_nodes(
         current_dist, current_id = heappop(heap)
         if current_dist > dist.get(current_id, float("inf")):
             continue
+        if max_distance_km is not None and current_dist > max_distance_km:
+            continue
         if current_id == end_id:
             break
 
         for next_id, edge_km in graph.adjacency.get(current_id, []):
+            if next_id in blocked:
+                continue
             candidate = current_dist + edge_km
+            if max_distance_km is not None and candidate > max_distance_km:
+                continue
             if candidate < dist.get(next_id, float("inf")):
                 dist[next_id] = candidate
                 prev[next_id] = current_id
@@ -357,6 +396,251 @@ def _move_towards(
         source[0] + (target[0] - source[0]) * ratio,
         source[1] + (target[1] - source[1]) * ratio,
     )
+
+
+def _node_path_distance_km(
+    graph: _RoadGraph,
+    node_ids: list[int] | tuple[int, ...],
+) -> float:
+    return polyline_length_km([graph.nodes[node_id] for node_id in node_ids])
+
+
+def _node_path_coords(
+    graph: _RoadGraph,
+    node_ids: list[int] | tuple[int, ...],
+) -> list[tuple[float, float]]:
+    return [graph.nodes[node_id] for node_id in node_ids]
+
+
+def _dedupe_coords(
+    points: list[tuple[float, float]],
+    min_gap_km: float = 1e-6,
+) -> list[tuple[float, float]]:
+    deduped: list[tuple[float, float]] = []
+    for point in points:
+        if not deduped:
+            deduped.append(point)
+            continue
+        if (
+            haversine_km(deduped[-1][0], deduped[-1][1], point[0], point[1])
+            > min_gap_km
+        ):
+            deduped.append(point)
+    return deduped
+
+
+def _find_route_anchors(
+    graph: _RoadGraph,
+    coords: list[tuple[float, float]],
+    road_snap_max_m: float,
+) -> list[_RoadAnchor]:
+    if len(coords) < 4:
+        return []
+
+    total_km = max(polyline_length_km(coords), 1e-9)
+    snap_limit_km = min(0.012, max(0.003, road_snap_max_m / 1000.0 * 0.12))
+    end_point = coords[-1]
+    anchors: list[_RoadAnchor] = []
+    seen: set[int] = set()
+    traveled_km = 0.0
+
+    for idx in range(1, len(coords) - 1):
+        previous = coords[idx - 1]
+        current = coords[idx]
+        traveled_km += haversine_km(previous[0], previous[1], current[0], current[1])
+        progress_ratio = traveled_km / total_km
+        if progress_ratio < 0.12 or progress_ratio > 0.78:
+            continue
+        if haversine_km(current[0], current[1], end_point[0], end_point[1]) < 0.18:
+            continue
+
+        nearest = _nearest_graph_node(graph, current)
+        if nearest is None:
+            continue
+        node_id, snap_km = nearest
+        if snap_km > snap_limit_km or node_id in seen:
+            continue
+        neighbor_count = len(
+            {neighbor_id for neighbor_id, _edge_km in graph.adjacency.get(node_id, [])}
+        )
+        if neighbor_count < 2:
+            continue
+
+        seen.add(node_id)
+        anchors.append(
+            _RoadAnchor(
+                coord_index=idx,
+                node_id=node_id,
+                progress_ratio=progress_ratio,
+            )
+        )
+
+    return anchors
+
+
+def _cycle_detours_for_anchor(
+    graph: _RoadGraph,
+    anchor: _RoadAnchor,
+    max_cycle_km: float,
+) -> list[_RoadDetour]:
+    neighbors = list(dict(graph.adjacency.get(anchor.node_id, [])).items())
+    if len(neighbors) < 2:
+        return []
+
+    detours: list[_RoadDetour] = []
+    signatures: set[tuple[int, ...]] = set()
+    for left_idx, (left_id, left_km) in enumerate(neighbors):
+        for right_id, right_km in neighbors[left_idx + 1 :]:
+            budget_km = max_cycle_km - left_km - right_km
+            if budget_km <= 0.02:
+                continue
+
+            middle = _shortest_path_nodes(
+                graph,
+                left_id,
+                right_id,
+                blocked_ids={anchor.node_id},
+                max_distance_km=budget_km,
+            )
+            if middle is None or len(middle) < 2:
+                continue
+
+            nodes = (anchor.node_id, *middle, anchor.node_id)
+            distance_km = _node_path_distance_km(graph, nodes)
+            if distance_km < 0.12 or distance_km > max_cycle_km:
+                continue
+
+            forward = nodes[1:-1]
+            reverse = tuple(reversed(forward))
+            signature = min(forward, reverse)
+            if signature in signatures:
+                continue
+            signatures.add(signature)
+            detours.append(
+                _RoadDetour(
+                    anchor=anchor,
+                    nodes=nodes,
+                    distance_km=distance_km,
+                )
+            )
+
+    detours.sort(key=lambda item: item.distance_km)
+    return detours
+
+
+def _spur_detour_for_anchor(
+    graph: _RoadGraph,
+    anchor: _RoadAnchor,
+    rnd: random.Random,
+) -> _RoadDetour | None:
+    neighbors = [
+        (neighbor_id, edge_km)
+        for neighbor_id, edge_km in graph.adjacency.get(anchor.node_id, [])
+        if 0.02 <= edge_km <= 0.14
+    ]
+    if not neighbors:
+        return None
+    neighbor_id, edge_km = rnd.choice(neighbors)
+    nodes = (anchor.node_id, neighbor_id, anchor.node_id)
+    return _RoadDetour(
+        anchor=anchor,
+        nodes=nodes,
+        distance_km=edge_km * 2.0,
+    )
+
+
+def _insert_road_detours(
+    graph: _RoadGraph,
+    coords: list[tuple[float, float]],
+    target_distance_km: float,
+    rnd: random.Random,
+    road_snap_max_m: float,
+) -> list[tuple[float, float]]:
+    current_km = polyline_length_km(coords)
+    if current_km >= target_distance_km:
+        return coords
+
+    anchors = _find_route_anchors(graph, coords, road_snap_max_m)
+    if not anchors:
+        return coords
+
+    insertions: dict[int, list[list[tuple[float, float]]]] = {}
+    used_anchors: set[int] = set()
+    used_signatures: set[tuple[int, ...]] = set()
+
+    for _attempt in range(min(10, max(2, len(anchors)))):
+        remaining_km = target_distance_km - current_km
+        if remaining_km <= 0.02:
+            break
+
+        max_cycle_km = min(0.85, max(0.22, remaining_km + 0.16))
+        candidates: list[tuple[float, _RoadDetour]] = []
+        for anchor in anchors:
+            if anchor.node_id in used_anchors:
+                continue
+            for detour in _cycle_detours_for_anchor(graph, anchor, max_cycle_km):
+                signature = detour.nodes[1:-1]
+                if signature in used_signatures:
+                    continue
+                overshoot_km = max(0.0, detour.distance_km - remaining_km)
+                if overshoot_km > 0.18:
+                    continue
+                midpoint_bias = abs(anchor.progress_ratio - 0.48) * 0.12
+                score = (
+                    abs(remaining_km - detour.distance_km)
+                    + overshoot_km * 1.8
+                    + midpoint_bias
+                    + rnd.random() * 0.035
+                )
+                candidates.append((score, detour))
+
+        if not candidates:
+            spur_anchors = [
+                anchor for anchor in anchors if anchor.node_id not in used_anchors
+            ]
+            rnd.shuffle(spur_anchors)
+            for anchor in spur_anchors:
+                detour = _spur_detour_for_anchor(graph, anchor, rnd)
+                if detour is None:
+                    continue
+                if detour.distance_km - remaining_km > 0.12:
+                    continue
+                candidates.append(
+                    (abs(remaining_km - detour.distance_km) + 0.4, detour)
+                )
+                break
+
+        if not candidates:
+            break
+
+        candidates.sort(key=lambda item: item[0])
+        chosen = rnd.choice(candidates[: min(3, len(candidates))])[1]
+        used_anchors.add(chosen.anchor.node_id)
+        used_signatures.add(chosen.nodes[1:-1])
+        detour_coords = _node_path_coords(graph, chosen.nodes)
+        insertions.setdefault(chosen.anchor.coord_index, []).append(detour_coords)
+        current_km += chosen.distance_km
+
+    if not insertions:
+        return coords
+
+    inflated: list[tuple[float, float]] = []
+    for idx, coord in enumerate(coords):
+        inflated.append(coord)
+        for detour_coords in insertions.get(idx, []):
+            for detour_coord in detour_coords:
+                if (
+                    haversine_km(
+                        inflated[-1][0],
+                        inflated[-1][1],
+                        detour_coord[0],
+                        detour_coord[1],
+                    )
+                    > 1e-6
+                ):
+                    inflated.append(detour_coord)
+
+    return _dedupe_coords(inflated)
 
 
 def _build_road_route_coords(
@@ -457,57 +741,13 @@ def _build_road_route_coords(
     if len(coords) < 2:
         return None
 
-    distance_km = polyline_length_km(coords)
-
-    if distance_km < target_distance_km:
-        tail_id = snapped_ids[-1]
-        neighbors = graph.adjacency.get(tail_id, [])
-        if neighbors:
-            preferred = [
-                (neighbor_id, edge_km)
-                for neighbor_id, edge_km in neighbors
-                if 0.01 <= edge_km <= 0.08
-            ]
-            candidates = preferred or neighbors
-            detour_id, detour_km = rnd.choice(candidates)
-            detour_pair_km = max(1e-6, detour_km * 2.0)
-            gap_km = max(0.0, target_distance_km - distance_km)
-            floor_loops = max(1, int(gap_km / detour_pair_km))
-            ceil_loops = min(500, floor_loops + 1)
-            loop_candidates = {floor_loops, ceil_loops}
-            loops = min(
-                loop_candidates,
-                key=lambda n: abs(
-                    distance_km + detour_pair_km * n - target_distance_km
-                ),
-            )
-
-            anchor = graph.nodes[tail_id]
-            end_point = coords[-1]
-            detour_coords = coords[:-1]
-            if (
-                haversine_km(
-                    detour_coords[-1][0],
-                    detour_coords[-1][1],
-                    anchor[0],
-                    anchor[1],
-                )
-                > 1e-6
-            ):
-                detour_coords.append(anchor)
-            for _ in range(max(1, min(500, loops))):
-                detour_coords.extend([graph.nodes[detour_id], anchor])
-            if (
-                haversine_km(
-                    detour_coords[-1][0],
-                    detour_coords[-1][1],
-                    end_point[0],
-                    end_point[1],
-                )
-                > 1e-6
-            ):
-                detour_coords.append(end_point)
-            coords = detour_coords
+    coords = _insert_road_detours(
+        graph=graph,
+        coords=coords,
+        target_distance_km=target_distance_km,
+        rnd=rnd,
+        road_snap_max_m=road_snap_max_m,
+    )
 
     resampled = _resample_polyline(coords, step_m)
     if len(resampled) < 2:
@@ -564,6 +804,57 @@ def _order_must_pass_nodes(
     if not nodes:
         return [start, start]
 
+    if len(nodes) > 7:
+        remaining = nodes[:]
+        ordered: list[tuple[float, float]] = []
+        cursor = start
+        while remaining:
+            next_idx = min(
+                range(len(remaining)),
+                key=lambda idx: haversine_km(
+                    cursor[0], cursor[1], remaining[idx][0], remaining[idx][1]
+                ),
+            )
+            cursor = remaining.pop(next_idx)
+            ordered.append(cursor)
+
+        improved = True
+        while improved:
+            improved = False
+            path = [start, *ordered]
+            for left in range(1, len(path) - 2):
+                for right in range(left + 1, len(path) - 1):
+                    old_len = haversine_km(
+                        path[left - 1][0],
+                        path[left - 1][1],
+                        path[left][0],
+                        path[left][1],
+                    ) + haversine_km(
+                        path[right][0],
+                        path[right][1],
+                        path[right + 1][0],
+                        path[right + 1][1],
+                    )
+                    new_len = haversine_km(
+                        path[left - 1][0],
+                        path[left - 1][1],
+                        path[right][0],
+                        path[right][1],
+                    ) + haversine_km(
+                        path[left][0],
+                        path[left][1],
+                        path[right + 1][0],
+                        path[right + 1][1],
+                    )
+                    if new_len + 1e-9 < old_len:
+                        ordered[left - 1 : right] = reversed(ordered[left - 1 : right])
+                        improved = True
+                        break
+                if improved:
+                    break
+
+        return [start, *ordered]
+
     best_order: tuple[tuple[float, float], ...] | None = None
     best_len = float("inf")
     for order in itertools.permutations(nodes):
@@ -587,15 +878,51 @@ def _inflate_route_distance(
         return route_nodes
 
     extended = list(route_nodes)
-    start = route_nodes[0]
-    while current < target_distance_km:
-        detour = add_meter_jitter(
-            start[0],
-            start[1],
-            rnd.uniform(15.0, 35.0),
-            rnd.uniform(15.0, 35.0),
+    attempts = 0
+    while current < target_distance_km and attempts < 80:
+        attempts += 1
+        segments: list[tuple[int, float]] = []
+        for idx in range(1, len(extended)):
+            start = extended[idx - 1]
+            end = extended[idx]
+            segment_km = haversine_km(start[0], start[1], end[0], end[1])
+            if segment_km >= 0.03:
+                segments.append((idx, segment_km))
+        if not segments:
+            break
+
+        total_segment_km = sum(length for _idx, length in segments)
+        pick = rnd.uniform(0.0, total_segment_km)
+        insert_idx = segments[-1][0]
+        for idx, length in segments:
+            pick -= length
+            if pick <= 0.0:
+                insert_idx = idx
+                break
+
+        start = extended[insert_idx - 1]
+        end = extended[insert_idx]
+        ratio = rnd.uniform(0.34, 0.66)
+        mid = (
+            start[0] + (end[0] - start[0]) * ratio,
+            start[1] + (end[1] - start[1]) * ratio,
         )
-        extended.insert(-1, detour)
+
+        lat_scale = 111_320.0
+        lng_scale = 111_320.0 * max(math.cos(math.radians(mid[0])), 1e-6)
+        north_m = (end[0] - start[0]) * lat_scale
+        east_m = (end[1] - start[1]) * lng_scale
+        seg_m = max(1.0, math.hypot(north_m, east_m))
+        side = -1.0 if rnd.random() < 0.5 else 1.0
+        extra_needed_m = max(0.0, (target_distance_km - current) * 1000.0)
+        offset_m = min(140.0, max(25.0, extra_needed_m * rnd.uniform(0.28, 0.46)))
+        detour = add_meter_jitter(
+            mid[0],
+            mid[1],
+            side * (-east_m / seg_m) * offset_m,
+            side * (north_m / seg_m) * offset_m,
+        )
+        extended.insert(insert_idx, detour)
         current = polyline_length_km(extended)
 
     return extended
