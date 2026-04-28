@@ -1,8 +1,9 @@
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .config import Settings
 
@@ -22,8 +23,29 @@ class ApiResponse:
 class CampusRunClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.session = requests.Session()
+        self.session = self._build_session()
         self.session_id = ""
+
+    def _build_session(self) -> requests.Session:
+        session = requests.Session()
+        retry_count = max(1, self.settings.network.retry_count)
+        if retry_count <= 1:
+            return session
+
+        retries = Retry(
+            total=retry_count - 1,
+            connect=retry_count - 1,
+            read=retry_count - 1,
+            status=retry_count - 1,
+            backoff_factor=0.6,
+            status_forcelist=tuple(range(500, 600)),
+            allowed_methods=None,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def _build_url(self, endpoint: str) -> str:
         endpoint = endpoint.strip()
@@ -49,15 +71,6 @@ class CampusRunClient:
             "User-Agent": self.settings.network.user_agent,
         }
 
-    @staticmethod
-    def _is_retryable_exception(exc: Exception) -> bool:
-        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-            return True
-        if isinstance(exc, requests.HTTPError):
-            response = getattr(exc, "response", None)
-            return response is not None and int(response.status_code) >= 500
-        return False
-
     def _request(
         self,
         method: str,
@@ -66,59 +79,43 @@ class CampusRunClient:
     ) -> ApiResponse:
         url = self._build_url(endpoint)
         method_upper = method.upper()
-        last_error: Exception | None = None
+        kwargs: dict[str, Any] = {
+            "headers": self._headers(),
+            "timeout": self.settings.network.timeout_sec,
+        }
+        if method_upper == "GET":
+            kwargs["params"] = payload or {}
+        else:
+            kwargs["json"] = payload or {}
 
-        for attempt in range(1, self.settings.network.retry_count + 1):
-            try:
-                kwargs: dict[str, Any] = {
-                    "headers": self._headers(),
-                    "timeout": self.settings.network.timeout_sec,
-                }
-                if method_upper == "GET":
-                    kwargs["params"] = payload or {}
-                else:
-                    kwargs["json"] = payload or {}
+        try:
+            response = self.session.request(method=method_upper, url=url, **kwargs)
+        except requests.RequestException as exc:
+            raise ApiError(f"Request failed for {endpoint}: {exc}") from exc
 
-                response = self.session.request(method=method_upper, url=url, **kwargs)
-                if response.status_code >= 500:
-                    response.raise_for_status()
-                if response.status_code >= 400:
-                    raise ApiError(
-                        f"HTTP {response.status_code} for {endpoint}: {response.text[:200]}"
-                    )
+        if response.status_code >= 400:
+            raise ApiError(
+                f"HTTP {response.status_code} for {endpoint}: {response.text[:200]}"
+            )
 
-                try:
-                    body = response.json()
-                except ValueError as exc:
-                    raise ApiError(f"Invalid JSON response from {endpoint}") from exc
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ApiError(f"Invalid JSON response from {endpoint}") from exc
 
-                cookie_session = self.session.cookies.get("sessionid")
-                if cookie_session:
-                    self.session_id = cookie_session
+        cookie_session = self.session.cookies.get("sessionid")
+        if cookie_session:
+            self.session_id = cookie_session
 
-                code = int(body.get("code", 0))
-                message = str(body.get("message") or body.get("msg") or "")
-                data = body.get("data")
+        code = int(body.get("code", 0))
+        message = str(body.get("message") or body.get("msg") or "")
+        data = body.get("data")
 
-                if code == -2:
-                    raise ApiError("Session invalid (code=-2)")
-                if code != 1:
-                    raise ApiError(
-                        message or f"API error code={code} endpoint={endpoint}"
-                    )
-                return ApiResponse(code=code, message=message, data=data, raw=body)
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                if (
-                    attempt >= self.settings.network.retry_count
-                    or not self._is_retryable_exception(exc)
-                ):
-                    break
-                time.sleep(1.2**attempt)
-
-        if isinstance(last_error, ApiError):
-            raise last_error
-        raise ApiError(f"Request failed for {endpoint}: {last_error}")
+        if code == -2:
+            raise ApiError("Session invalid (code=-2)")
+        if code != 1:
+            raise ApiError(message or f"API error code={code} endpoint={endpoint}")
+        return ApiResponse(code=code, message=message, data=data, raw=body)
 
     def authenticate_user(self) -> ApiResponse:
         response = self._request(
