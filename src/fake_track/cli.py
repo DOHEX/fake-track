@@ -138,7 +138,7 @@ def run_once(
 ) -> None:
     """Run one test cycle."""
     try:
-        settings = Settings.from_env()
+        settings = Settings.load()
     except ConfigError as exc:
         _exit_with_error("run", exc, json_output)
 
@@ -177,7 +177,7 @@ def doctor(
 ) -> None:
     """Check login, route fetching, and createLine connectivity."""
     try:
-        settings = Settings.from_env()
+        settings = Settings.load()
     except ConfigError as exc:
         _exit_with_error("doctor", exc, json_output)
 

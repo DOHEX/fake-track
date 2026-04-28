@@ -32,12 +32,12 @@ class CampusRunClient:
 
         if endpoint.startswith("/"):
             # Keep canonical trailing slash for Django-style endpoints.
-            return f"{self.settings.base_url_xcxapi}{endpoint}"
+            return f"{self.settings.network.base_url_xcxapi}{endpoint}"
 
         if endpoint.startswith("xcxtapi/"):
-            return f"{self.settings.base_url_root}/{endpoint}"
+            return f"{self.settings.network.base_url_root}/{endpoint}"
 
-        return f"{self.settings.base_url_xcxapi}/{endpoint}"
+        return f"{self.settings.network.base_url_xcxapi}/{endpoint}"
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -45,8 +45,8 @@ class CampusRunClient:
             "Authorization": "",
             "X-Session-ID": self.session_id,
             "charset": "utf-8",
-            "Referer": self.settings.referer,
-            "User-Agent": self.settings.user_agent,
+            "Referer": self.settings.network.referer,
+            "User-Agent": self.settings.network.user_agent,
         }
 
     @staticmethod
@@ -68,11 +68,11 @@ class CampusRunClient:
         method_upper = method.upper()
         last_error: Exception | None = None
 
-        for attempt in range(1, self.settings.retry_count + 1):
+        for attempt in range(1, self.settings.network.retry_count + 1):
             try:
                 kwargs: dict[str, Any] = {
                     "headers": self._headers(),
-                    "timeout": self.settings.timeout_sec,
+                    "timeout": self.settings.network.timeout_sec,
                 }
                 if method_upper == "GET":
                     kwargs["params"] = payload or {}
@@ -110,7 +110,7 @@ class CampusRunClient:
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if (
-                    attempt >= self.settings.retry_count
+                    attempt >= self.settings.network.retry_count
                     or not self._is_retryable_exception(exc)
                 ):
                     break

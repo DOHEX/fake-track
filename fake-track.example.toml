@@ -1,0 +1,42 @@
+[run]
+start_lat = 30.83378
+start_lng = 121.504532
+target_distance_km = 2.03
+target_pace_min_per_km = 6.0
+target_duration_min_sec = 460
+target_duration_max_sec = 490
+sample_interval_sec = 1
+must_pass_radius_km = 0.05
+compensation_factor = 1.0
+device_brand = ""
+distance_jitter_ratio = 0.03
+pace_jitter_ratio = 0.08
+
+[route]
+road_routing_enabled = true
+road_map_path = "map.osm"
+road_snap_max_m = 120.0
+road_coordinate_bridge_enabled = true
+
+[output]
+report_path = ""
+
+[network]
+timeout_sec = 20
+retry_count = 3
+
+[points]
+point_accuracy_min = 8
+point_accuracy_max = 25
+point_jitter_m = 2.5
+timestamp_jitter_ms = 220
+
+[guard]
+max_speed_threshold_m_s = 10.0
+max_jump_distance_km = 0.1
+min_move_distance_m = 5.0
+min_move_speed_m_s = 0.8
+gps_accuracy_threshold_m = 100.0
+primary_angle_threshold_deg = 120.0
+secondary_angle_threshold_deg = 150.0
+distance_tolerance_ratio = 0.95

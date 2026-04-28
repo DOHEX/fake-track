@@ -296,9 +296,10 @@ class RunWorkflow:
         return None
 
     def _resolve_compensation_factor(self) -> float:
-        brand = (self.settings.device_brand or "").strip().lower()
+        run_config = self.settings.run
+        brand = (run_config.device_brand or "").strip().lower()
         if not brand:
-            return float(self.settings.compensation_factor)
+            return float(run_config.compensation_factor)
 
         if "honor" in brand:
             return 1.06
@@ -307,7 +308,7 @@ class RunWorkflow:
             if key in brand:
                 return factor
 
-        return float(self.settings.compensation_factor)
+        return float(run_config.compensation_factor)
 
     def _extract_server_limits(
         self, login_data: dict[str, Any]
@@ -331,6 +332,8 @@ class RunWorkflow:
         limits: ServerRunLimits,
         compensation_factor: float,
     ) -> RunTargetPlan:
+        run_config = self.settings.run
+        guard_config = self.settings.guard
         hard_distance_floor_km = max(2.0, limits.required_distance_km)
         compensated_required_km = limits.required_distance_km / max(
             0.01, compensation_factor
@@ -339,16 +342,16 @@ class RunWorkflow:
             hard_distance_floor_km,
             compensated_required_km,
             limits.required_distance_km
-            * max(0.0, self.settings.distance_tolerance_ratio),
+            * max(0.0, guard_config.distance_tolerance_ratio),
         )
         distance_guard_min_km += 0.015
 
         base_distance_km = max(
-            self.settings.target_distance_km, limits.required_distance_km
+            run_config.target_distance_km, limits.required_distance_km
         )
         distance_ratio = random.uniform(
-            max(0.0, 1.0 - self.settings.distance_jitter_ratio),
-            1.0 + self.settings.distance_jitter_ratio,
+            max(0.0, 1.0 - run_config.distance_jitter_ratio),
+            1.0 + run_config.distance_jitter_ratio,
         )
         target_distance_km = max(
             distance_guard_min_km + 0.02,
@@ -357,12 +360,12 @@ class RunWorkflow:
         )
 
         base_pace = min(
-            max(self.settings.target_pace_min_per_km, limits.min_pace_min_per_km),
+            max(run_config.target_pace_min_per_km, limits.min_pace_min_per_km),
             limits.max_pace_min_per_km,
         )
         pace_ratio = random.uniform(
-            max(0.0, 1.0 - self.settings.pace_jitter_ratio),
-            1.0 + self.settings.pace_jitter_ratio,
+            max(0.0, 1.0 - run_config.pace_jitter_ratio),
+            1.0 + run_config.pace_jitter_ratio,
         )
         target_pace_min_per_km = min(
             max(base_pace * pace_ratio, limits.min_pace_min_per_km),
@@ -370,12 +373,12 @@ class RunWorkflow:
         )
 
         duration_min_sec = min(
-            self.settings.target_duration_min_sec,
-            self.settings.target_duration_max_sec,
+            run_config.target_duration_min_sec,
+            run_config.target_duration_max_sec,
         )
         duration_max_sec = max(
-            self.settings.target_duration_min_sec,
-            self.settings.target_duration_max_sec,
+            run_config.target_duration_min_sec,
+            run_config.target_duration_max_sec,
         )
         target_duration_sec = random.randint(
             max(60, duration_min_sec),
@@ -394,13 +397,15 @@ class RunWorkflow:
         pass_points: list[dict[str, Any]],
         progress: ProgressCallback | None,
     ) -> TrackGenerationContext:
-        start = (self.settings.start_lat, self.settings.start_lng)
+        run_config = self.settings.run
+        route_config = self.settings.route
+        start = (run_config.start_lat, run_config.start_lng)
         converted_pass_points = pass_points
         bridge_applied = False
 
         if (
-            self.settings.road_routing_enabled
-            and self.settings.road_coordinate_bridge_enabled
+            route_config.road_routing_enabled
+            and route_config.road_coordinate_bridge_enabled
         ):
             start = gcj02_to_wgs84(start[0], start[1])
             converted_pass_points = self._convert_pass_points(
@@ -420,28 +425,32 @@ class RunWorkflow:
         context: TrackGenerationContext,
         plan: RunTargetPlan,
     ) -> TrackGenerationRequest:
+        run_config = self.settings.run
+        route_config = self.settings.route
+        points_config = self.settings.points
+        guard_config = self.settings.guard
         return TrackGenerationRequest(
             start=context.start,
             must_pass_points=context.pass_points,
             target_distance_km=plan.target_distance_km,
             target_pace_min_per_km=plan.target_pace_min_per_km,
-            sample_interval_sec=self.settings.sample_interval_sec,
-            must_pass_radius_km=self.settings.must_pass_radius_km,
-            jitter_m=self.settings.point_jitter_m,
-            timestamp_jitter_ms=self.settings.timestamp_jitter_ms,
-            accuracy_min=self.settings.point_accuracy_min,
-            accuracy_max=self.settings.point_accuracy_max,
-            road_routing_enabled=self.settings.road_routing_enabled,
-            road_map_path=self.settings.road_map_path,
-            road_snap_max_m=self.settings.road_snap_max_m,
+            sample_interval_sec=run_config.sample_interval_sec,
+            must_pass_radius_km=run_config.must_pass_radius_km,
+            jitter_m=points_config.point_jitter_m,
+            timestamp_jitter_ms=points_config.timestamp_jitter_ms,
+            accuracy_min=points_config.point_accuracy_min,
+            accuracy_max=points_config.point_accuracy_max,
+            road_routing_enabled=route_config.road_routing_enabled,
+            road_map_path=route_config.road_map_path,
+            road_snap_max_m=route_config.road_snap_max_m,
             filter_policy=TrackFilterPolicy(
-                max_speed_threshold_m_s=self.settings.max_speed_threshold_m_s,
-                max_jump_distance_km=self.settings.max_jump_distance_km,
-                min_move_distance_m=self.settings.min_move_distance_m,
-                min_move_speed_m_s=self.settings.min_move_speed_m_s,
-                gps_accuracy_threshold_m=self.settings.gps_accuracy_threshold_m,
-                primary_angle_threshold_deg=self.settings.primary_angle_threshold_deg,
-                secondary_angle_threshold_deg=self.settings.secondary_angle_threshold_deg,
+                max_speed_threshold_m_s=guard_config.max_speed_threshold_m_s,
+                max_jump_distance_km=guard_config.max_jump_distance_km,
+                min_move_distance_m=guard_config.min_move_distance_m,
+                min_move_speed_m_s=guard_config.min_move_speed_m_s,
+                gps_accuracy_threshold_m=guard_config.gps_accuracy_threshold_m,
+                primary_angle_threshold_deg=guard_config.primary_angle_threshold_deg,
+                secondary_angle_threshold_deg=guard_config.secondary_angle_threshold_deg,
             ),
         )
 
@@ -452,6 +461,7 @@ class RunWorkflow:
         plan: RunTargetPlan,
         progress: ProgressCallback | None,
     ) -> tuple[TrackBuildResult, int, int, RunTargetPlan]:
+        run_config = self.settings.run
         current_plan = plan
         run_data = self.track_generator.generate(
             self._build_generation_request(context, current_plan)
@@ -459,9 +469,9 @@ class RunWorkflow:
 
         for _ in range(3):
             if (
-                self.settings.target_duration_min_sec
+                run_config.target_duration_min_sec
                 <= run_data.duration_sec
-                <= self.settings.target_duration_max_sec
+                <= run_config.target_duration_max_sec
             ):
                 break
 
@@ -626,7 +636,7 @@ class RunWorkflow:
 
         self._emit(progress, "Step 2/3: fetch route points")
         route = self.client.fetch_route_points(
-            self.settings.start_lat, self.settings.start_lng
+            self.settings.run.start_lat, self.settings.run.start_lng
         )
         points = route.data if isinstance(route.data, list) else []
 
@@ -736,7 +746,7 @@ class RunWorkflow:
 
         self._emit(progress, "Step 4/9: fetch route points")
         rand_info = self.client.fetch_route_points(
-            self.settings.start_lat, self.settings.start_lng
+            self.settings.run.start_lat, self.settings.run.start_lng
         )
         pass_points = rand_info.data if isinstance(rand_info.data, list) else []
         if not pass_points:
@@ -793,7 +803,7 @@ class RunWorkflow:
         if run_options.track_image_path:
             try:
                 track_image = render_track_overlay_png(
-                    map_path=self.settings.road_map_path,
+                    map_path=self.settings.route.road_map_path,
                     points=run_data.points,
                     output_path=run_options.track_image_path,
                     must_pass_points=context.pass_points,
@@ -816,7 +826,7 @@ class RunWorkflow:
         summary_payload["pass_point"] = self._count_pass_hits(
             points=upload_points,
             must_pass_points=pass_points,
-            radius_km=self.settings.must_pass_radius_km,
+            radius_km=self.settings.run.must_pass_radius_km,
         )
         encrypted_summary = aes_encrypt(
             json.dumps(summary_payload, ensure_ascii=False),
@@ -953,10 +963,10 @@ class RunWorkflow:
         return uploaded
 
     def _write_report(self, report: RunReport) -> None:
-        if not self.settings.report_path:
+        if not self.settings.output.report_path:
             return
 
-        path = Path(self.settings.report_path)
+        path = Path(self.settings.output.report_path)
         payload = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "report": report.to_dict(),
