@@ -63,9 +63,9 @@ class TrackGenerationRequest:
 
 
 @dataclass(slots=True, frozen=True)
-class RunningData:
+class RunCounts:
     morning: int
-    universal: int
+    normal: int
     effective: int
     target_effective: int
 

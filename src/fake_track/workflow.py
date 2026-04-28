@@ -1,10 +1,12 @@
 import json
 import random
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from rich.progress import (
     BarColumn,
@@ -19,7 +21,7 @@ from .config import Settings
 from .crypto import aes_encrypt, encryption_self_check
 from .geo import gcj02_to_wgs84, haversine_km, wgs84_to_gcj02
 from .models import (
-    RunningData,
+    RunCounts,
     RunType,
     TrackBuildResult,
     TrackFilterPolicy,
@@ -27,10 +29,11 @@ from .models import (
     TrackPoint,
 )
 from .payloads import build_path_upload_payload, build_run_summary_payload
-from .track import TrackGenerator
+from .track_generator import TrackGenerator
 from .visualize import render_track_overlay_png
 
 ProgressCallback = Callable[[str], None]
+UPLOAD_BATCH_SIZE = 50
 
 
 @dataclass(slots=True)
@@ -113,37 +116,37 @@ class RunWorkflow:
 
     @staticmethod
     def _check_target_counts(
-        running_data: RunningData,
+        run_counts: RunCounts,
         run_type: RunType,
     ) -> str | None:
-        if running_data.target_effective <= 0:
+        if run_counts.target_effective <= 0:
             return None
 
         if (
-            running_data.morning >= running_data.target_effective
-            and running_data.universal >= running_data.target_effective
+            run_counts.morning >= run_counts.target_effective
+            and run_counts.normal >= run_counts.target_effective
         ):
             return (
-                f"Both morning ({running_data.morning}) and normal "
-                f"({running_data.universal}) targets already met "
-                f"(target={running_data.target_effective})"
+                f"Both morning ({run_counts.morning}) and normal "
+                f"({run_counts.normal}) targets already met "
+                f"(target={run_counts.target_effective})"
             )
 
         if (
             run_type is RunType.MORNING
-            and running_data.morning >= running_data.target_effective
+            and run_counts.morning >= run_counts.target_effective
         ):
             return (
                 f"Morning run target already met: "
-                f"{running_data.morning}/{running_data.target_effective}"
+                f"{run_counts.morning}/{run_counts.target_effective}"
             )
         if (
             run_type is RunType.NORMAL
-            and running_data.universal >= running_data.target_effective
+            and run_counts.normal >= run_counts.target_effective
         ):
             return (
                 f"Normal run target already met: "
-                f"{running_data.universal}/{running_data.target_effective}"
+                f"{run_counts.normal}/{run_counts.target_effective}"
             )
 
         return None
@@ -151,7 +154,7 @@ class RunWorkflow:
     def _make_skip_report(
         self,
         skip_reason: str,
-        running_data: RunningData | None = None,
+        run_counts: RunCounts | None = None,
         run_type: RunType | None = None,
         server_responses: dict[str, Any] | None = None,
     ) -> RunReport:
@@ -161,11 +164,11 @@ class RunWorkflow:
             record_id=None,
             summary={
                 "run_type": run_type.value if run_type else None,
-                "morning": running_data.morning if running_data else None,
-                "universal": running_data.universal if running_data else None,
-                "effective": running_data.effective if running_data else None,
+                "morning": run_counts.morning if run_counts else None,
+                "normal": run_counts.normal if run_counts else None,
+                "effective": run_counts.effective if run_counts else None,
                 "target_effective": (
-                    running_data.target_effective if running_data else None
+                    run_counts.target_effective if run_counts else None
                 ),
                 "skip_reason": skip_reason,
             },
@@ -694,34 +697,34 @@ class RunWorkflow:
         run_type_label = "morning run" if run_type is RunType.MORNING else "normal run"
         self._emit(progress, f"  Run type: {run_type_label} ({run_type.value})")
 
-        running_data_resp = self.client.fetch_running_data(student_id)
-        rd = running_data_resp.data
+        run_counts_resp = self.client.fetch_run_counts(student_id)
+        rd = run_counts_resp.data
         if not isinstance(rd, dict):
             raise ApiError(
-                f"RunningData response data is not a dict: {type(rd).__name__}"
+                f"Run counts response data is not a dict: {type(rd).__name__}"
             )
-        running_data = RunningData(
+        run_counts = RunCounts(
             morning=int(rd.get("morning", 0)),
-            universal=int(rd.get("universal", 0)),
+            normal=int(rd.get("universal", 0)),
             effective=int(rd.get("effective", 0)),
             target_effective=int(rd.get("target_effective", 0)),
         )
         self._emit(
             progress,
-            f"  Running data: morning={running_data.morning}, "
-            f"universal={running_data.universal}, "
-            f"effective={running_data.effective}, "
-            f"target_effective={running_data.target_effective}",
+            f"  Run counts: morning={run_counts.morning}, "
+            f"normal={run_counts.normal}, "
+            f"effective={run_counts.effective}, "
+            f"target_effective={run_counts.target_effective}",
         )
 
-        target_skip_reason = self._check_target_counts(running_data, run_type)
+        target_skip_reason = self._check_target_counts(run_counts, run_type)
         if target_skip_reason is not None and not run_options.ignore_target_met:
             self._emit(progress, f"  Skipping: {target_skip_reason}")
             return self._make_skip_report(
                 skip_reason=target_skip_reason,
-                running_data=running_data,
+                run_counts=run_counts,
                 run_type=run_type,
-                server_responses={"running_data": running_data_resp.raw},
+                server_responses={"run_counts": run_counts_resp.raw},
             )
         if target_skip_reason is not None:
             self._emit(
@@ -754,19 +757,7 @@ class RunWorkflow:
 
         context = self._prepare_track_context(pass_points, progress)
 
-        self._emit(progress, "Step 5/9: create running record")
-        line = self.client.create_run_record(
-            student_id=student_id, pass_points=pass_points
-        )
-        record_id = int((line.data or {}).get("record_id", 0))
-        if not record_id:
-            raise ApiError("createLine missing record_id")
-        self._emit(
-            progress,
-            "IMPORTANT: Please do NOT open the mini app while this run is in progress.",
-        )
-
-        self._emit(progress, "Step 6/9: generate track")
+        self._emit(progress, "Step 5/9: generate track")
         run_data, distance_guard_attempts, quality_guard_attempts, final_plan = (
             self._generate_track_with_guards(
                 context=context,
@@ -795,7 +786,7 @@ class RunWorkflow:
         )
 
         upload_points = run_data.points
-        if context.coordinate_bridge_applied and run_data.road_routing_used:
+        if context.coordinate_bridge_applied:
             upload_points = self._convert_track_points(run_data.points, wgs84_to_gcj02)
             self._emit(progress, "Coordinate bridge: wgs84 -> gcj02 for upload")
 
@@ -811,6 +802,18 @@ class RunWorkflow:
                 self._emit(progress, f"Track image saved: {track_image}")
             except Exception as exc:  # noqa: BLE001
                 self._emit(progress, f"Track image skipped: {exc}")
+
+        self._emit(progress, "Step 6/9: create running record")
+        line = self.client.create_run_record(
+            student_id=student_id, pass_points=pass_points
+        )
+        record_id = int((line.data or {}).get("record_id", 0))
+        if not record_id:
+            raise ApiError("createLine missing record_id")
+        self._emit(
+            progress,
+            "IMPORTANT: Please do NOT open the mini app while this run is in progress.",
+        )
 
         self._wait_before_submit(
             run_duration_sec=run_data.duration_sec,
@@ -859,10 +862,16 @@ class RunWorkflow:
         self._emit(progress, "Fetch result: GetPathPoints")
         path_info = self.client.fetch_path_points(record_id)
 
-        warning = record.data.get("warning") if isinstance(record.data, dict) else None
+        if isinstance(record.data, dict):
+            warning = record.data.get("warning")
+        else:
+            warning = (
+                f"recordInfo response data is not a dict: {type(record.data).__name__}"
+            )
+        warning_text = str(warning).strip() if warning else None
 
         report = RunReport(
-            success=True,
+            success=warning_text is None,
             mode="full",
             record_id=record_id,
             summary={
@@ -895,6 +904,7 @@ class RunWorkflow:
                 "uploaded_batches": uploaded_batches,
                 "uploaded_point_count": len(upload_points),
                 "target_duration_sec": final_plan.target_duration_sec,
+                "server_warning_detected": warning_text is not None,
                 "record_payload": summary_payload,
             },
             server={
@@ -906,7 +916,7 @@ class RunWorkflow:
                 "recordInfo": record.raw,
                 "GetPathPoints": path_info.raw,
             },
-            warning=warning,
+            warning=warning_text,
         )
 
         self._write_report(report)
@@ -922,21 +932,12 @@ class RunWorkflow:
         if not points:
             return 0
 
-        batch_size = 50
-        total_batches = (len(points) + batch_size - 1) // batch_size
+        total_batches = (len(points) + UPLOAD_BATCH_SIZE - 1) // UPLOAD_BATCH_SIZE
         uploaded = 0
 
-        offsets = range(0, len(points), batch_size)
-
         if progress is None:
-            for offset in offsets:
-                segment = points[offset : offset + batch_size]
-                payload = build_path_upload_payload(record_id, segment)
-                encrypted = aes_encrypt(
-                    json.dumps(payload, ensure_ascii=False),
-                    self.settings.run_key,
-                )
-                self.client.upload_path_batch(encrypted)
+            for segment in batched(points, UPLOAD_BATCH_SIZE):
+                self._upload_batch(record_id, segment)
                 uploaded += 1
             return uploaded
 
@@ -949,18 +950,24 @@ class RunWorkflow:
             transient=True,
         ) as progress_bar:
             task_id = progress_bar.add_task("Uploading", total=total_batches)
-            for offset in offsets:
-                segment = points[offset : offset + batch_size]
-                payload = build_path_upload_payload(record_id, segment)
-                encrypted = aes_encrypt(
-                    json.dumps(payload, ensure_ascii=False),
-                    self.settings.run_key,
-                )
-                self.client.upload_path_batch(encrypted)
+            for segment in batched(points, UPLOAD_BATCH_SIZE):
+                self._upload_batch(record_id, segment)
                 uploaded += 1
                 progress_bar.update(task_id, advance=1)
 
         return uploaded
+
+    def _upload_batch(
+        self,
+        record_id: int,
+        points: Sequence[TrackPoint],
+    ) -> None:
+        payload = build_path_upload_payload(record_id, points)
+        encrypted = aes_encrypt(
+            json.dumps(payload, ensure_ascii=False),
+            self.settings.run_key,
+        )
+        self.client.upload_path_batch(encrypted)
 
     def _write_report(self, report: RunReport) -> None:
         if not self.settings.output.report_path:

@@ -58,7 +58,7 @@ def _print_report(report: RunReport, json_output: bool, title: str) -> None:
         table.add_row("run_type", str(summary.get("run_type", "-")))
         if summary.get("morning") is not None:
             table.add_row("morning", str(summary["morning"]))
-            table.add_row("universal", str(summary["universal"]))
+            table.add_row("normal", str(summary["normal"]))
             table.add_row("target_effective", str(summary["target_effective"]))
     if report.mode == "connectivity":
         table.add_row("student_id", str(summary.get("student_id", "-")))
@@ -165,6 +165,8 @@ def run_once(
         _exit_with_error("run", exc, json_output)
 
     _print_report(report, json_output=json_output, title="Run Summary")
+    if not report.success:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -190,3 +192,5 @@ def doctor(
         _exit_with_error("doctor", exc, json_output)
 
     _print_report(report, json_output=json_output, title="Doctor Summary")
+    if not report.success:
+        raise typer.Exit(1)

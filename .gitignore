@@ -13,8 +13,6 @@ dev
 *cache
 .env
 
-*.lock
-
 # Local debug artifacts
 .local/
 

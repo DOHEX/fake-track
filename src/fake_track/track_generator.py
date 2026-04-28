@@ -928,6 +928,39 @@ def _inflate_route_distance(
     return extended
 
 
+def _build_fallback_route_coords(
+    route_nodes: list[tuple[float, float]],
+    target_distance_km: float,
+    step_m: float,
+    rnd: random.Random,
+) -> list[tuple[float, float]]:
+    inflated_nodes = _inflate_route_distance(
+        route_nodes,
+        target_distance_km,
+        rnd,
+    )
+    coords = [inflated_nodes[0]]
+    for index in range(1, len(inflated_nodes)):
+        if rnd.random() < 0.15:
+            coords.extend(
+                _axis_aligned_segment(
+                    inflated_nodes[index - 1],
+                    inflated_nodes[index],
+                    step_m,
+                    rnd,
+                )
+            )
+        else:
+            coords.extend(
+                _linear_segment(
+                    inflated_nodes[index - 1],
+                    inflated_nodes[index],
+                    step_m,
+                )
+            )
+    return coords
+
+
 class TrackGenerator:
     def generate(self, request: TrackGenerationRequest) -> TrackBuildResult:
         rnd = random.Random(request.random_seed)
@@ -949,32 +982,20 @@ class TrackGenerator:
                 must_pass_radius_km=request.must_pass_radius_km,
             )
             if coords is None:
-                raise ValueError(
-                    "Road routing is enabled but failed to build a road-aligned track"
+                used_road_network = False
+                coords = _build_fallback_route_coords(
+                    route_nodes=route_nodes,
+                    target_distance_km=request.target_distance_km,
+                    step_m=step_m,
+                    rnd=rnd,
                 )
         else:
-            route_nodes = _inflate_route_distance(
-                route_nodes,
-                request.target_distance_km,
-                rnd,
+            coords = _build_fallback_route_coords(
+                route_nodes=route_nodes,
+                target_distance_km=request.target_distance_km,
+                step_m=step_m,
+                rnd=rnd,
             )
-            coords = [request.start]
-            for index in range(1, len(route_nodes)):
-                if rnd.random() < 0.15:
-                    coords.extend(
-                        _axis_aligned_segment(
-                            route_nodes[index - 1],
-                            route_nodes[index],
-                            step_m,
-                            rnd,
-                        )
-                    )
-                else:
-                    coords.extend(
-                        _linear_segment(
-                            route_nodes[index - 1], route_nodes[index], step_m
-                        )
-                    )
 
         now_ms = int(time.time() * 1000)
         point_jitter_m = (

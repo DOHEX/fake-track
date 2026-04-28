@@ -29,7 +29,7 @@ jobs:
         run: uv python install
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --frozen
 
       - name: Start daily run
         id: campus_run
@@ -62,7 +62,7 @@ jobs:
           WARNING=$(jq -r '.warning // "-"' run-report.json)
           RUN_TYPE=$(jq -r '.summary.run_type // "-"' run-report.json)
           MORNING=$(jq -r '.summary.morning // "-"' run-report.json)
-          UNIVERSAL=$(jq -r '.summary.universal // "-"' run-report.json)
+          NORMAL=$(jq -r '.summary.normal // "-"' run-report.json)
           TARGET_EFFECTIVE=$(jq -r '.summary.target_effective // "-"' run-report.json)
           DISTANCE=$(jq -r '.summary.generated_distance_km // "-"' run-report.json)
           DURATION=$(jq -r '.summary.generated_duration_sec // "-"' run-report.json)
@@ -83,7 +83,7 @@ jobs:
             echo "- mode: $MODE"
             echo "- timezone: $TZ"
             echo "- run_type: $RUN_TYPE"
-            echo "- counts: morning=$MORNING universal=$UNIVERSAL target=$TARGET_EFFECTIVE"
+            echo "- counts: morning=$MORNING normal=$NORMAL target=$TARGET_EFFECTIVE"
             echo "- record_id: $RECORD_ID"
             echo "- distance_km: $DISTANCE"
             echo "- duration_sec: $DURATION"
