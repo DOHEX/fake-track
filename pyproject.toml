@@ -1,6 +1,6 @@
 [project]
 name = "fake-track"
-version = "0.2.0"
+version = "1.0.0"
 description = "华理校园跑调试工具"
 readme = "README.md"
 authors = [

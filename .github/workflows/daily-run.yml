@@ -30,8 +30,78 @@ jobs:
         run: uv sync
 
       - name: Start daily run
+        id: campus_run
+        continue-on-error: true
         env:
           FAKE_TRACK_KEY: ${{ secrets.FAKE_TRACK_KEY }}
           FAKE_TRACK_PHONE: ${{ secrets.FAKE_TRACK_PHONE }}
           FAKE_TRACK_PASSWORD: ${{ secrets.FAKE_TRACK_PASSWORD }}
-        run: uv run fake-track run
+        run: uv run fake-track run --json-output > run-report.json
+
+      - name: Summarize result
+        id: result
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -s run-report.json ]; then
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo "mode=missing-report" >> "$GITHUB_OUTPUT"
+            {
+              echo "## fake-track result"
+              echo ""
+              echo "No JSON report was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          SUCCESS=$(jq -r '.success // false' run-report.json)
+          MODE=$(jq -r '.mode // "unknown"' run-report.json)
+          RECORD_ID=$(jq -r '.record_id // "-"' run-report.json)
+          WARNING=$(jq -r '.warning // "-"' run-report.json)
+          DISTANCE=$(jq -r '.summary.generated_distance_km // "-"' run-report.json)
+          DURATION=$(jq -r '.summary.generated_duration_sec // "-"' run-report.json)
+          BATCHES=$(jq -r '.summary.uploaded_batches // 0' run-report.json)
+          FORCE_SUBMIT=$(jq -r '.summary.generated_force_submit // false' run-report.json)
+          IGNORE_TARGET=$(jq -r '.summary.generated_ignore_target_met // false' run-report.json)
+          SKIP_REASON=$(jq -r '.summary.skip_reason // .summary.generated_ignored_target_skip_reason // "-"' run-report.json)
+
+          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "uploaded_batches=$BATCHES" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## fake-track result"
+            echo ""
+            echo "- success: $SUCCESS"
+            echo "- mode: $MODE"
+            echo "- record_id: $RECORD_ID"
+            echo "- distance_km: $DISTANCE"
+            echo "- duration_sec: $DURATION"
+            echo "- uploaded_batches: $BATCHES"
+            echo "- force_submit: $FORCE_SUBMIT"
+            echo "- ignore_target_met: $IGNORE_TARGET"
+            echo "- skip_reason: $SKIP_REASON"
+            echo "- warning: $WARNING"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate result
+        if: always()
+        shell: bash
+        run: |
+          BATCHES="${{ steps.result.outputs.uploaded_batches }}"
+          BATCHES="${BATCHES:-0}"
+
+          if [ "${{ steps.campus_run.outcome }}" != "success" ]; then
+            echo "fake-track command failed"
+            exit 1
+          fi
+
+          if [ "${{ steps.result.outputs.success }}" != "true" ]; then
+            echo "fake-track reported success=false"
+            exit 1
+          fi
+
+          if [ "${{ steps.result.outputs.mode }}" = "full" ] && [ "$BATCHES" -lt 1 ]; then
+            echo "Full run completed without uploaded batches"
+            exit 1
+          fi

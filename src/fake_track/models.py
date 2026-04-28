@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 
@@ -24,6 +25,11 @@ class TrackBuildResult:
     road_routing_used: bool
     start_time: str
     end_time: str
+
+
+class RunType(Enum):
+    MORNING = "morning"
+    NORMAL = "normal"
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,6 +60,14 @@ class TrackGenerationRequest:
     road_snap_max_m: float = 120.0
     random_seed: int | None = None
     filter_policy: TrackFilterPolicy = field(default_factory=TrackFilterPolicy)
+
+
+@dataclass(slots=True, frozen=True)
+class RunningData:
+    morning: int
+    universal: int
+    effective: int
+    target_effective: int
 
 
 def format_timestamp_ms(timestamp_ms: int) -> str:

@@ -172,3 +172,10 @@ class CampusRunClient:
 
     def fetch_path_points(self, record_id: int) -> ApiResponse:
         return self._request("GET", "/GetPathPoints/", {"record_id": record_id})
+
+    def fetch_running_data(self, student_id: int) -> ApiResponse:
+        return self._request(
+            "GET",
+            "/RunningData/",
+            {"id": student_id},
+        )

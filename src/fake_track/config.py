@@ -6,6 +6,47 @@ class ConfigError(ValueError):
     pass
 
 
+def _validate_aes_key(value: str) -> str:
+    if len(value.encode("utf-8")) not in {16, 24, 32}:
+        raise ValueError("FAKE_TRACK_KEY must be 16/24/32 bytes for AES")
+    return value
+
+
+class CryptoSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.local"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    run_key: str = Field(
+        validation_alias=AliasChoices("FAKE_TRACK_KEY", "FAKE_TRACK_SECRET")
+    )
+
+    @field_validator("run_key")
+    @classmethod
+    def _validate_run_key(cls, value: str) -> str:
+        return _validate_aes_key(value)
+
+    @classmethod
+    def from_env(cls) -> "CryptoSettings":
+        try:
+            return cls()
+        except ValidationError as exc:
+            details: list[str] = []
+            for item in exc.errors():
+                location = ".".join(str(part) for part in item.get("loc", ()))
+                message = item.get("msg", "invalid value")
+                details.append(f"{location}: {message}" if location else str(message))
+
+            if details:
+                raise ConfigError(
+                    "Invalid environment configuration:\n- " + "\n- ".join(details)
+                ) from exc
+            raise ConfigError(str(exc)) from exc
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
@@ -172,9 +213,7 @@ class Settings(BaseSettings):
     @field_validator("run_key")
     @classmethod
     def _validate_run_key(cls, value: str) -> str:
-        if len(value.encode("utf-8")) not in {16, 24, 32}:
-            raise ValueError("FAKE_TRACK_KEY must be 16/24/32 bytes for AES")
-        return value
+        return _validate_aes_key(value)
 
     @field_validator("base_url_xcxapi", "base_url_root")
     @classmethod

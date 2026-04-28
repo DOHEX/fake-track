@@ -6,11 +6,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+
 from .client import ApiError, CampusRunClient
 from .config import Settings
 from .crypto import aes_encrypt, encryption_self_check
 from .geo import gcj02_to_wgs84, haversine_km, wgs84_to_gcj02
 from .models import (
+    RunningData,
+    RunType,
     TrackBuildResult,
     TrackFilterPolicy,
     TrackGenerationRequest,
@@ -37,8 +47,10 @@ class RunReport:
 
 
 @dataclass(slots=True)
-class RunDebugOptions:
-    enabled: bool = False
+class RunExecutionOptions:
+    skip_submit_wait: bool = False
+    force_submit: bool = False
+    ignore_target_met: bool = False
     track_image_path: str | None = None
 
 
@@ -88,6 +100,82 @@ class RunWorkflow:
         if hours > 0:
             return f"{hours}:{minutes:02d}:{secs:02d}"
         return f"{minutes:02d}:{secs:02d}"
+
+    @staticmethod
+    def _classify_run_type() -> RunType | None:
+        now = datetime.now()
+        time_decimal = now.hour + now.minute / 60.0 + now.second / 3600.0
+        if 6.0 <= time_decimal < 7.0:
+            return RunType.MORNING
+        if 7.0 <= time_decimal < 22.0:
+            return RunType.NORMAL
+        return None
+
+    @staticmethod
+    def _check_target_counts(
+        running_data: RunningData,
+        run_type: RunType,
+    ) -> str | None:
+        if running_data.target_effective <= 0:
+            return None
+
+        if (
+            running_data.morning >= running_data.target_effective
+            and running_data.universal >= running_data.target_effective
+        ):
+            return (
+                f"Both morning ({running_data.morning}) and normal "
+                f"({running_data.universal}) targets already met "
+                f"(target={running_data.target_effective})"
+            )
+
+        if (
+            run_type is RunType.MORNING
+            and running_data.morning >= running_data.target_effective
+        ):
+            return (
+                f"Morning run target already met: "
+                f"{running_data.morning}/{running_data.target_effective}"
+            )
+        if (
+            run_type is RunType.NORMAL
+            and running_data.universal >= running_data.target_effective
+        ):
+            return (
+                f"Normal run target already met: "
+                f"{running_data.universal}/{running_data.target_effective}"
+            )
+
+        return None
+
+    def _make_skip_report(
+        self,
+        skip_reason: str,
+        running_data: RunningData | None = None,
+        run_type: RunType | None = None,
+        server_responses: dict[str, Any] | None = None,
+    ) -> RunReport:
+        report = RunReport(
+            success=True,
+            mode="skipped",
+            record_id=None,
+            summary={
+                "run_type": run_type.value if run_type else None,
+                "morning": running_data.morning if running_data else None,
+                "universal": running_data.universal if running_data else None,
+                "effective": running_data.effective if running_data else None,
+                "target_effective": (
+                    running_data.target_effective if running_data else None
+                ),
+                "skip_reason": skip_reason,
+            },
+            server={
+                **(server_responses or {}),
+            },
+            warning=skip_reason,
+        )
+        self._write_report(report)
+        return report
 
     @staticmethod
     def _emit(progress: ProgressCallback | None, message: str) -> None:
@@ -188,11 +276,12 @@ class RunWorkflow:
         limits: ServerRunLimits,
         compensation_factor: float,
     ) -> RunTargetPlan:
+        hard_distance_floor_km = max(2.0, limits.required_distance_km)
         compensated_required_km = limits.required_distance_km / max(
             0.01, compensation_factor
         )
         distance_guard_min_km = max(
-            0.1,
+            hard_distance_floor_km,
             compensated_required_km,
             limits.required_distance_km
             * max(0.0, self.settings.distance_tolerance_ratio),
@@ -207,7 +296,9 @@ class RunWorkflow:
             1.0 + self.settings.distance_jitter_ratio,
         )
         target_distance_km = max(
-            limits.required_distance_km, base_distance_km * distance_ratio
+            distance_guard_min_km + 0.02,
+            limits.required_distance_km,
+            base_distance_km * distance_ratio,
         )
 
         base_pace = min(
@@ -348,24 +439,26 @@ class RunWorkflow:
                 self._build_generation_request(context, current_plan)
             )
 
+        distance_floor_km = max(
+            2.0,
+            limits.required_distance_km,
+            current_plan.distance_guard_min_km,
+        )
+
         distance_guard_attempts = 0
-        while (
-            run_data.distance_km < current_plan.distance_guard_min_km
-            and distance_guard_attempts < 5
-        ):
-            deficit_km = max(
-                0.0, current_plan.distance_guard_min_km - run_data.distance_km
-            )
+        while run_data.distance_km < distance_floor_km and distance_guard_attempts < 7:
+            deficit_km = max(0.0, distance_floor_km - run_data.distance_km)
             next_target_distance = current_plan.target_distance_km + max(
-                0.08, deficit_km * 1.3
+                0.10, deficit_km * 1.4
             )
             distance_guard_attempts += 1
 
             self._emit(
                 progress,
                 (
-                    f"Distance guard {distance_guard_attempts}/5: "
-                    f"rebuild with target {next_target_distance:.2f}km"
+                    f"Distance guard {distance_guard_attempts}/7: "
+                    f"floor {distance_floor_km:.2f}km, "
+                    f"rebuild target {next_target_distance:.2f}km"
                 ),
             )
 
@@ -377,6 +470,13 @@ class RunWorkflow:
             )
             run_data = self.track_generator.generate(
                 self._build_generation_request(context, current_plan)
+            )
+
+        if run_data.distance_km < distance_floor_km:
+            raise ApiError(
+                "Track generation failed distance guard: "
+                f"need >= {distance_floor_km:.2f}km, got {run_data.distance_km:.2f}km "
+                f"after {distance_guard_attempts} rebuilds"
             )
 
         return run_data, distance_guard_attempts, current_plan
@@ -401,15 +501,26 @@ class RunWorkflow:
             f"Simulate running before submit: {self._format_seconds(wait_sec)}",
         )
         remaining = wait_sec
-        while remaining > 0:
-            sleep_sec = min(15.0, remaining)
-            time.sleep(sleep_sec)
-            remaining -= sleep_sec
-            if remaining > 0:
-                self._emit(
-                    progress,
-                    f"Running... remaining {self._format_seconds(remaining)}",
-                )
+        if progress is None:
+            while remaining > 0:
+                sleep_sec = min(15.0, remaining)
+                time.sleep(sleep_sec)
+                remaining -= sleep_sec
+            return
+
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            transient=True,
+        ) as progress_bar:
+            task_id = progress_bar.add_task("Running", total=wait_sec)
+            while remaining > 0:
+                sleep_sec = min(1.0, remaining)
+                time.sleep(sleep_sec)
+                remaining -= sleep_sec
+                progress_bar.update(task_id, advance=sleep_sec)
 
     def run_connectivity(self, progress: ProgressCallback | None = None) -> RunReport:
         self._emit(progress, "Step 1/3: login")
@@ -449,19 +560,72 @@ class RunWorkflow:
 
     def run_full(
         self,
-        force: bool = False,
         progress: ProgressCallback | None = None,
-        debug: RunDebugOptions | None = None,
+        options: RunExecutionOptions | None = None,
     ) -> RunReport:
-        debug_options = debug or RunDebugOptions()
+        run_options = options or RunExecutionOptions()
+        force_submit = run_options.force_submit
 
-        self._emit(progress, "Step 1/8: crypto self-check")
+        self._emit(progress, "Step 1/9: crypto self-check")
         encryption_self_check(self.settings.run_key)
 
-        self._emit(progress, "Step 2/8: login")
+        self._emit(progress, "Step 2/9: login")
         login = self.client.authenticate_user()
         login_data = login.data if isinstance(login.data, dict) else {}
         student_id, limits = self._extract_server_limits(login_data)
+
+        self._emit(progress, "Step 3/9: check run status")
+        run_type = self._classify_run_type()
+
+        if run_type is None:
+            msg = (
+                "Current time is outside valid run windows "
+                "(morning: 06:00-07:00, normal: 07:00-22:00)"
+            )
+            self._emit(progress, f"  {msg}")
+            return self._make_skip_report(msg)
+
+        run_type_label = "morning run" if run_type is RunType.MORNING else "normal run"
+        self._emit(progress, f"  Run type: {run_type_label} ({run_type.value})")
+
+        running_data_resp = self.client.fetch_running_data(student_id)
+        rd = running_data_resp.data
+        if not isinstance(rd, dict):
+            raise ApiError(
+                f"RunningData response data is not a dict: {type(rd).__name__}"
+            )
+        running_data = RunningData(
+            morning=int(rd.get("morning", 0)),
+            universal=int(rd.get("universal", 0)),
+            effective=int(rd.get("effective", 0)),
+            target_effective=int(rd.get("target_effective", 0)),
+        )
+        self._emit(
+            progress,
+            f"  Running data: morning={running_data.morning}, "
+            f"universal={running_data.universal}, "
+            f"effective={running_data.effective}, "
+            f"target_effective={running_data.target_effective}",
+        )
+
+        target_skip_reason = self._check_target_counts(running_data, run_type)
+        if target_skip_reason is not None and not run_options.ignore_target_met:
+            self._emit(progress, f"  Skipping: {target_skip_reason}")
+            return self._make_skip_report(
+                skip_reason=target_skip_reason,
+                running_data=running_data,
+                run_type=run_type,
+                server_responses={"running_data": running_data_resp.raw},
+            )
+        if target_skip_reason is not None:
+            self._emit(
+                progress,
+                f"  Target check ignored: {target_skip_reason}",
+            )
+            self._emit(
+                progress,
+                "  Target already met, but --ignore-target-met is enabled; continue.",
+            )
 
         compensation_factor = self._resolve_compensation_factor()
         plan = self._build_target_plan(limits, compensation_factor)
@@ -474,7 +638,7 @@ class RunWorkflow:
             ),
         )
 
-        self._emit(progress, "Step 3/8: fetch route points")
+        self._emit(progress, "Step 4/9: fetch route points")
         rand_info = self.client.fetch_route_points(
             self.settings.start_lat, self.settings.start_lng
         )
@@ -484,7 +648,7 @@ class RunWorkflow:
 
         context = self._prepare_track_context(pass_points, progress)
 
-        self._emit(progress, "Step 4/8: create running record")
+        self._emit(progress, "Step 5/9: create running record")
         line = self.client.create_run_record(
             student_id=student_id, pass_points=pass_points
         )
@@ -496,7 +660,7 @@ class RunWorkflow:
             "IMPORTANT: Please do NOT open the mini app while this run is in progress.",
         )
 
-        self._emit(progress, "Step 5/8: generate track")
+        self._emit(progress, "Step 6/9: generate track")
         run_data, distance_guard_attempts, final_plan = (
             self._generate_track_with_guards(
                 context=context,
@@ -529,22 +693,22 @@ class RunWorkflow:
             upload_points = self._convert_track_points(run_data.points, wgs84_to_gcj02)
             self._emit(progress, "Coordinate bridge: wgs84 -> gcj02 for upload")
 
-        debug_track_image = None
-        if debug_options.enabled and debug_options.track_image_path:
+        track_image = None
+        if run_options.track_image_path:
             try:
-                debug_track_image = render_track_overlay_png(
+                track_image = render_track_overlay_png(
                     map_path=self.settings.road_map_path,
                     points=run_data.points,
-                    output_path=debug_options.track_image_path,
+                    output_path=run_options.track_image_path,
                     must_pass_points=context.pass_points,
                 )
-                self._emit(progress, f"Debug track image saved: {debug_track_image}")
+                self._emit(progress, f"Track image saved: {track_image}")
             except Exception as exc:  # noqa: BLE001
-                self._emit(progress, f"Debug track image skipped: {exc}")
+                self._emit(progress, f"Track image skipped: {exc}")
 
         self._wait_before_submit(
             run_duration_sec=run_data.duration_sec,
-            skip_wait=debug_options.enabled,
+            skip_wait=run_options.skip_submit_wait,
             progress=progress,
         )
 
@@ -565,18 +729,23 @@ class RunWorkflow:
 
         time.sleep(random.uniform(0.5, 1.3))
 
-        self._emit(progress, "Step 6/8: checkRecord")
+        self._emit(progress, "Step 7/9: checkRecord")
         check = self.client.validate_run_payload(encrypted_summary)
         check_status = None
         if isinstance(check.data, dict):
             check_status = int(check.data.get("status", 1))
-        if not force and check_status == 0:
+        if not force_submit and check_status == 0:
             raise ApiError(f"checkRecord rejected data: {check.message}")
+        if force_submit and check_status == 0:
+            self._emit(
+                progress,
+                "checkRecord rejected, but force submit is enabled; continue.",
+            )
 
-        self._emit(progress, "Step 7/8: updateRecordNew")
+        self._emit(progress, "Step 8/9: updateRecordNew")
         update = self.client.submit_run_summary(encrypted_summary)
 
-        self._emit(progress, "Step 8/8: upload path batches")
+        self._emit(progress, "Step 9/9: upload path batches")
         uploaded_batches = self._upload_batches(record_id, upload_points, progress)
 
         self._emit(progress, "Fetch result: recordInfo")
@@ -608,9 +777,14 @@ class RunWorkflow:
                 "generated_distance_guard_attempts": distance_guard_attempts,
                 "generated_road_routing_used": run_data.road_routing_used,
                 "generated_coordinate_bridge_applied": context.coordinate_bridge_applied,
-                "generated_debug_enabled": debug_options.enabled,
-                "generated_submit_wait_skipped": debug_options.enabled,
-                "generated_debug_track_image": debug_track_image,
+                "generated_track_image_enabled": (
+                    run_options.track_image_path is not None
+                ),
+                "generated_submit_wait_skipped": run_options.skip_submit_wait,
+                "generated_force_submit": force_submit,
+                "generated_ignore_target_met": run_options.ignore_target_met,
+                "generated_ignored_target_skip_reason": target_skip_reason,
+                "generated_track_image": track_image,
                 "uploaded_batches": uploaded_batches,
                 "uploaded_point_count": len(upload_points),
                 "target_duration_sec": final_plan.target_duration_sec,
@@ -645,19 +819,39 @@ class RunWorkflow:
         total_batches = (len(points) + batch_size - 1) // batch_size
         uploaded = 0
 
-        self._emit(progress, f"Upload started: {total_batches} batches")
-        for offset in range(0, len(points), batch_size):
-            segment = points[offset : offset + batch_size]
-            payload = build_path_upload_payload(record_id, segment)
-            encrypted = aes_encrypt(
-                json.dumps(payload, ensure_ascii=False),
-                self.settings.run_key,
-            )
-            self.client.upload_path_batch(encrypted)
-            uploaded += 1
+        offsets = range(0, len(points), batch_size)
 
-            percent = int(round((uploaded / max(1, total_batches)) * 100))
-            self._emit(progress, f"Upload {uploaded}/{total_batches} ({percent}%)")
+        if progress is None:
+            for offset in offsets:
+                segment = points[offset : offset + batch_size]
+                payload = build_path_upload_payload(record_id, segment)
+                encrypted = aes_encrypt(
+                    json.dumps(payload, ensure_ascii=False),
+                    self.settings.run_key,
+                )
+                self.client.upload_path_batch(encrypted)
+                uploaded += 1
+            return uploaded
+
+        self._emit(progress, f"Upload started: {total_batches} batches")
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.completed:.0f}/{task.total:.0f} batches"),
+            transient=True,
+        ) as progress_bar:
+            task_id = progress_bar.add_task("Uploading", total=total_batches)
+            for offset in offsets:
+                segment = points[offset : offset + batch_size]
+                payload = build_path_upload_payload(record_id, segment)
+                encrypted = aes_encrypt(
+                    json.dumps(payload, ensure_ascii=False),
+                    self.settings.run_key,
+                )
+                self.client.upload_path_batch(encrypted)
+                uploaded += 1
+                progress_bar.update(task_id, advance=1)
 
         return uploaded
 
