@@ -34,6 +34,11 @@ from .visualize import render_track_overlay_png
 
 ProgressCallback = Callable[[str], None]
 UPLOAD_BATCH_SIZE = 50
+SUCCESS_RECORD_WARNINGS = frozenset(
+    {
+        "恭喜您成绩达标",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -768,6 +773,10 @@ class RunWorkflow:
             )
         return str(warning).strip() if warning else None
 
+    @staticmethod
+    def _is_success_record_warning(warning: str | None) -> bool:
+        return warning in SUCCESS_RECORD_WARNINGS
+
     def _build_full_report(
         self,
         record_id: int,
@@ -781,9 +790,10 @@ class RunWorkflow:
     ) -> RunReport:
         run_data = track.run_data
         warning_text = self._extract_record_warning(responses.record)
+        is_success_warning = self._is_success_record_warning(warning_text)
 
         return RunReport(
-            success=warning_text is None,
+            success=warning_text is None or is_success_warning,
             mode="full",
             record_id=record_id,
             summary={
@@ -819,6 +829,7 @@ class RunWorkflow:
                 "uploaded_point_count": len(track.upload_points),
                 "target_duration_sec": track.final_plan.target_duration_sec,
                 "server_warning_detected": warning_text is not None,
+                "server_warning_treated_as_success": is_success_warning,
                 "record_payload": summary_payload,
             },
             server={

@@ -46,6 +46,7 @@ FAKE_TRACK_PASSWORD=
 | 命令 | 用途 |
 | --- | --- |
 | `uv run fake-track run` | 执行一次完整链路测试 |
+| `uv run fake-track counts` | 查看当前晨跑、普通跑和有效完成次数 |
 | `uv run fake-track doctor` | 检查登录、取点和建单连通性 |
 | `uv run fake-track encrypt "hello"` | 使用小程序同格式输出密文 |
 
@@ -53,9 +54,10 @@ FAKE_TRACK_PASSWORD=
 
 | 参数 | 适用命令 | 说明 |
 | --- | --- | --- |
-| `--json-output` | `run`, `doctor` | 只输出完整 JSON 报告，关闭过程日志和进度条 |
+| `--json-output` | `run`, `counts`, `doctor` | 输出 JSON；`run`/`doctor` 会关闭过程日志和进度条 |
 | `--track-image` | `run` | 输出轨迹叠加图到 `.local/debug-images` |
 | `--track-image-path PATH` | `run` | 输出轨迹叠加图到指定路径 |
+| `--report-path PATH` | `run` | 保留控制台日志，同时把完整 JSON 报告写入文件 |
 | `--skip-wait` | `run` | 不等待模拟跑步时长，直接提交 |
 | `--force-submit` | `run` | `checkRecord` 不通过时仍继续提交 |
 | `--ignore-target-met` | `run` | 当前次数目标已完成时仍继续跑 |
@@ -94,7 +96,8 @@ copy fake-track.example.toml fake-track.toml
 ## 输出
 
 - 默认输出阶段日志、长任务进度条和 `Run Summary`
-- `--json-output` 仅输出完整 JSON，适合 CI 或脚本消费
+- `--json-output` 仅输出完整 JSON，适合脚本消费
+- `--report-path PATH` 会保留正常控制台输出，并额外写出完整 JSON，适合 CI
 - `fake-track.toml` 里的 `[output].report_path` 会额外写入完整 JSON 报告
 - `--track-image` 会生成 `.local/debug-images/track-overlay-<timestamp>.png`
 
@@ -106,7 +109,7 @@ copy fake-track.example.toml fake-track.toml
 - `FAKE_TRACK_PHONE`
 - `FAKE_TRACK_PASSWORD`
 
-工作流使用 `--json-output` 生成 `run-report.json`，并把安全摘要写入 Step Summary。目标次数已满会视为成功跳过，其他异常跳过或上传批次数为 0 会失败。
+工作流使用 `--report-path run-report.json` 保留运行过程日志，同时生成 JSON 报告并把安全摘要写入 Step Summary。目标次数已满会视为成功跳过，其他异常跳过或上传批次数为 0 会失败。
 
 ## 开发
 

@@ -12,6 +12,7 @@ wheels/
 dev
 *cache
 .env
+.codex
 
 # Local debug artifacts
 .local/

@@ -38,7 +38,7 @@ jobs:
           FAKE_TRACK_KEY: ${{ secrets.FAKE_TRACK_KEY }}
           FAKE_TRACK_PHONE: ${{ secrets.FAKE_TRACK_PHONE }}
           FAKE_TRACK_PASSWORD: ${{ secrets.FAKE_TRACK_PASSWORD }}
-        run: uv run fake-track run --json-output > run-report.json
+        run: uv run fake-track run --report-path run-report.json
 
       - name: Summarize result
         id: result
