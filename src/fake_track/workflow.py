@@ -780,6 +780,8 @@ class RunWorkflow:
     def _build_full_report(
         self,
         record_id: int,
+        run_type: RunType,
+        run_counts: RunCounts,
         track: PreparedTrack,
         compensation_factor: float,
         run_options: RunExecutionOptions,
@@ -797,6 +799,15 @@ class RunWorkflow:
             mode="full",
             record_id=record_id,
             summary={
+                "run_type": run_type.value,
+                "morning": run_counts.morning,
+                "normal": run_counts.normal,
+                "effective": run_counts.effective,
+                "target_effective": run_counts.target_effective,
+                "target_met": (
+                    run_counts.target_effective > 0
+                    and run_counts.effective >= run_counts.target_effective
+                ),
                 "generated_distance_km": round(run_data.distance_km, 4),
                 "generated_distance_raw_km": round(run_data.raw_distance_km, 4),
                 "generated_distance_confirmed_km": round(
@@ -1058,6 +1069,8 @@ class RunWorkflow:
 
         report = self._build_full_report(
             record_id=record_id,
+            run_type=run_type,
+            run_counts=run_counts,
             track=track,
             compensation_factor=compensation_factor,
             run_options=run_options,
