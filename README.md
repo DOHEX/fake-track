@@ -68,13 +68,23 @@ FAKE_TRACK_PASSWORD=
 
 ## 配置
 
+### 环境变量
+
 `.env` 只放身份和密钥：
 
 | 变量 | 说明 |
 | --- | --- |
 | `FAKE_TRACK_KEY` | AES key，也兼容旧名 `FAKE_TRACK_SECRET` |
-| `FAKE_TRACK_PHONE` | 手机号 |
-| `FAKE_TRACK_PASSWORD` | 密码 |
+| `FAKE_TRACK_PHONE` | 手机号（多账号时可省略） |
+| `FAKE_TRACK_PASSWORD` | 密码（多账号时可省略） |
+
+可选开关：
+
+| 变量 | 说明 |
+| --- | --- |
+| `FAKE_TRACK_IGNORE_TARGET_MET` | 等价 `--ignore-target-met`，接受 `1/true/yes/on` |
+
+### 多账号
 
 多账号可以放在 `fake-track.toml` 的 `[[accounts]]` 中，手机号和密码从这里读取：
 
@@ -92,6 +102,8 @@ password = ""
 
 `FAKE_TRACK_KEY` 仍然从环境变量读取，所有账号共用。
 `run` 默认并行执行所有账号，使用 `--account` 可选择单个账号。
+
+### 运行参数
 
 普通运行配置放 `fake-track.toml`。没有这个文件时会使用内置默认值；需要调整时可复制示例：
 
@@ -127,6 +139,10 @@ copy fake-track.example.toml fake-track.toml
 - `FAKE_TRACK_KEY`
 - `FAKE_TRACK_PHONE`
 - `FAKE_TRACK_PASSWORD`
+
+如果想通过仓库 Variables 控制忽略目标次数，可设置：
+
+- `FAKE_TRACK_IGNORE_TARGET_MET`（建议值：`true`）
 
 工作流使用 `--report-path run-report.json` 保留运行过程日志，同时生成 JSON 报告并把安全摘要写入 Step Summary。目标次数已满会视为成功跳过，其他异常跳过或上传批次数为 0 会失败。
 
