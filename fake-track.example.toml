@@ -1,3 +1,13 @@
+[[accounts]]
+name = "account-1"
+phone = ""
+password = ""
+
+[[accounts]]
+name = "account-2"
+phone = ""
+password = ""
+
 [run]
 start_lat = 30.83378
 start_lng = 121.504532

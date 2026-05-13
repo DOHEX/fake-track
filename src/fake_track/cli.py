@@ -1,4 +1,8 @@
 import json
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -17,18 +21,139 @@ console = Console()
 error_console = Console(stderr=True)
 
 
+@dataclass(frozen=True)
+class AccountContext:
+    index: int
+    settings: Settings
+    label: str
+    slug: str
+
+
+@dataclass(frozen=True)
+class AccountRunResult:
+    account: AccountContext
+    report: RunReport
+
+
 def _default_track_image_path() -> Path:
     default_name = datetime.now().strftime("track-overlay-%Y%m%d-%H%M%S.png")
     return Path(".local") / "debug-images" / default_name
 
 
-def _progress_printer(enabled: bool):
+def _with_account_suffix(path: Path, slug: str) -> Path:
+    if not slug:
+        return path
+    return path.with_name(f"{path.stem}-{slug}{path.suffix}")
+
+
+def _mask_phone(phone: str) -> str:
+    text = phone.strip()
+    if len(text) <= 4:
+        return text
+    return f"****{text[-4:]}"
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
+    return slug
+
+
+def _account_display_label(settings: Settings, index: int) -> str:
+    name = settings.account_name or f"account-{index}"
+    return f"{name} ({_mask_phone(settings.phone)})"
+
+
+def _account_slug(settings: Settings, index: int) -> str:
+    base = settings.account_name or f"account-{index}"
+    slug = _slugify(base)
+    if not slug:
+        slug = f"account-{index}"
+    digits = re.sub(r"\D", "", settings.phone)
+    suffix = digits[-4:] if digits else ""
+    return f"{slug}-{suffix}" if suffix else slug
+
+
+def _build_account_contexts(settings_list: list[Settings]) -> list[AccountContext]:
+    contexts: list[AccountContext] = []
+    for index, settings in enumerate(settings_list, start=1):
+        contexts.append(
+            AccountContext(
+                index=index,
+                settings=settings,
+                label=_account_display_label(settings, index),
+                slug=_account_slug(settings, index),
+            )
+        )
+    return contexts
+
+
+def _select_accounts(
+    contexts: list[AccountContext],
+    selectors: list[str] | None,
+) -> list[AccountContext]:
+    if not selectors:
+        return contexts
+
+    selected: list[AccountContext] = []
+    missing: list[str] = []
+    for selector in selectors:
+        selector_text = selector.strip()
+        if not selector_text:
+            continue
+
+        match: AccountContext | None = None
+        if selector_text.isdigit():
+            index = int(selector_text)
+            match = next((item for item in contexts if item.index == index), None)
+        else:
+            matches = [
+                item
+                for item in contexts
+                if item.settings.account_name
+                and item.settings.account_name.lower() == selector_text.lower()
+            ]
+            if len(matches) > 1:
+                raise typer.BadParameter(
+                    f"Account name '{selector_text}' is not unique."
+                )
+            match = matches[0] if matches else None
+
+        if match is None:
+            missing.append(selector_text)
+            continue
+
+        if match not in selected:
+            selected.append(match)
+
+    if missing:
+        available = ", ".join(
+            item.settings.account_name or str(item.index) for item in contexts
+        )
+        raise typer.BadParameter(
+            f"Unknown account: {', '.join(missing)}. Available: {available}"
+        )
+
+    return selected
+
+
+def _progress_printer(
+    enabled: bool,
+    prefix: str | None = None,
+    lock: threading.Lock | None = None,
+):
     if not enabled:
         return None
 
     def progress(message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        console.print(f"[cyan][{stamp}][/cyan] {message}")
+        text = f"[cyan][{stamp}][/cyan] {message}"
+        if prefix:
+            text = f"[cyan][{stamp}][/cyan] [{prefix}] {message}"
+        if lock:
+            with lock:
+                console.print(text)
+        else:
+            console.print(text)
 
     return progress
 
@@ -181,21 +306,23 @@ def _print_error_report(
     (output_console or console).print(table)
 
 
-def _print_counts(counts: dict[str, int | bool], json_output: bool) -> None:
+def _print_counts(counts_payload: dict[str, int | bool], json_output: bool) -> None:
     if json_output:
-        typer.echo(json.dumps(counts, ensure_ascii=False, indent=2))
+        typer.echo(json.dumps(counts_payload, ensure_ascii=False, indent=2))
         return
 
     table = Table(title="Run Counts", box=box.ASCII)
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
-    table.add_row("student_id", str(counts["student_id"]))
-    table.add_row("morning", str(counts["morning"]))
-    table.add_row("normal", str(counts["normal"]))
-    table.add_row("effective", str(counts["effective"]))
-    table.add_row("completed_target_count", str(counts["completed_target_count"]))
-    table.add_row("target_effective", str(counts["target_effective"]))
-    table.add_row("target_met", str(counts["target_met"]).lower())
+    table.add_row("student_id", str(counts_payload["student_id"]))
+    table.add_row("morning", str(counts_payload["morning"]))
+    table.add_row("normal", str(counts_payload["normal"]))
+    table.add_row("effective", str(counts_payload["effective"]))
+    table.add_row(
+        "completed_target_count", str(counts_payload["completed_target_count"])
+    )
+    table.add_row("target_effective", str(counts_payload["target_effective"]))
+    table.add_row("target_met", str(counts_payload["target_met"]).lower())
     console.print(table)
 
 
@@ -208,6 +335,79 @@ def _error_report(message: str) -> RunReport:
         server={},
         warning=message,
     )
+
+
+def _override_output_report_path(
+    settings: Settings,
+    report_path: str | None,
+) -> Settings:
+    if settings.output.report_path == report_path:
+        return settings
+    output = settings.output.model_copy(update={"report_path": report_path})
+    return settings.model_copy(update={"output": output})
+
+
+def _resolve_track_image_path(
+    track_image: bool,
+    track_image_path: Path | None,
+    account: AccountContext,
+    multi_run: bool,
+) -> str | None:
+    if track_image_path is None and not track_image:
+        return None
+
+    base = track_image_path or _default_track_image_path()
+    if multi_run:
+        base = _with_account_suffix(base, account.slug)
+    return str(base)
+
+
+def _build_multi_report(
+    results: list[AccountRunResult],
+) -> dict[str, object]:
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "success": all(item.report.success for item in results),
+        "mode": "multi",
+        "accounts": [
+            {
+                "index": item.account.index,
+                "name": item.account.settings.account_name,
+                "phone": _mask_phone(item.account.settings.phone),
+                "label": item.account.label,
+                "report": item.report.to_dict(),
+            }
+            for item in results
+        ],
+    }
+
+
+def _write_multi_report_file(report: dict[str, object], report_path: Path) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _print_multi_run_summary(results: list[AccountRunResult]) -> None:
+    table = Table(title="Multi Run Summary", box=box.ASCII)
+    table.add_column("Account", style="cyan")
+    table.add_column("Status", style="white")
+    table.add_column("Mode", style="white")
+    table.add_column("Record ID", style="white")
+    table.add_column("Warning", style="yellow")
+
+    for item in results:
+        report = item.report
+        table.add_row(
+            item.account.label,
+            _status_text(report.success),
+            str(report.mode),
+            _display_value(report.record_id),
+            _display_value(report.warning),
+        )
+    console.print(table)
 
 
 def _write_report_file(report: RunReport, report_path: Path) -> None:
@@ -241,16 +441,20 @@ def _exit_with_error(command: str, exc: Exception, json_output: bool) -> None:
     raise typer.Exit(1) from exc
 
 
-def _load_settings(
+def _load_accounts(
     command: str,
     json_output: bool,
     report_path: Path | None = None,
-) -> Settings:
+    selectors: list[str] | None = None,
+) -> list[AccountContext]:
     try:
-        return Settings.load()
+        settings_list = Settings.load_all()
     except ConfigError as exc:
         _try_write_error_report(report_path, str(exc))
         _exit_with_error(command, exc, json_output)
+
+    contexts = _build_account_contexts(settings_list)
+    return _select_accounts(contexts, selectors)
 
 
 def _extract_student_id(login_data: object) -> int:
@@ -338,16 +542,91 @@ def run_once(
         False,
         "--ignore-target-met",
         help="Run even when the current target count is already met.",
+        envvar="FAKE_TRACK_IGNORE_TARGET_MET",
+    ),
+    account: list[str] = typer.Option(
+        None,
+        "--account",
+        help="Account name or index from fake-track.toml. Can be repeated.",
     ),
 ) -> None:
     """Run one test cycle."""
-    settings = _load_settings("run", json_output, report_path=report_path)
+    accounts = _load_accounts(
+        "run",
+        json_output,
+        report_path=report_path,
+        selectors=account,
+    )
+    if not accounts:
+        raise typer.BadParameter("No account selected.")
 
-    image_path: str | None = None
-    if track_image_path is not None:
-        image_path = str(track_image_path)
-    elif track_image:
-        image_path = str(_default_track_image_path())
+    multi_run = len(accounts) > 1
+    if multi_run:
+        lock = threading.Lock()
+        results: list[AccountRunResult] = []
+
+        def _run_account(context: AccountContext) -> AccountRunResult:
+            settings = context.settings
+            if settings.output.report_path:
+                settings = _override_output_report_path(settings, None)
+
+            image_path = _resolve_track_image_path(
+                track_image=track_image,
+                track_image_path=track_image_path,
+                account=context,
+                multi_run=True,
+            )
+            workflow = RunWorkflow(settings)
+            run_options = RunExecutionOptions(
+                skip_submit_wait=skip_wait,
+                force_submit=force_submit,
+                ignore_target_met=ignore_target_met,
+                track_image_path=image_path,
+                disable_progress=True,
+            )
+            progress = _progress_printer(
+                enabled=not json_output,
+                prefix=context.label,
+                lock=lock,
+            )
+            try:
+                report = workflow.run_full(progress=progress, options=run_options)
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+                report = _error_report(str(exc))
+            return AccountRunResult(account=context, report=report)
+
+        max_workers = min(4, len(accounts))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_run_account, ctx) for ctx in accounts]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        results.sort(key=lambda item: item.account.index)
+        multi_report = _build_multi_report(results)
+
+        if report_path is not None:
+            try:
+                _write_multi_report_file(multi_report, report_path)
+            except OSError as exc:
+                _exit_with_error("run", exc, json_output)
+
+        if json_output:
+            typer.echo(json.dumps(multi_report, ensure_ascii=False, indent=2))
+        else:
+            _print_multi_run_summary(results)
+
+        if not multi_report.get("success", False):
+            raise typer.Exit(1)
+        return
+
+    account_context = accounts[0]
+    settings = account_context.settings
+    image_path = _resolve_track_image_path(
+        track_image=track_image,
+        track_image_path=track_image_path,
+        account=account_context,
+        multi_run=False,
+    )
 
     workflow = RunWorkflow(settings)
     run_options = RunExecutionOptions(
@@ -355,6 +634,7 @@ def run_once(
         force_submit=force_submit,
         ignore_target_met=ignore_target_met,
         track_image_path=image_path,
+        disable_progress=False,
     )
 
     try:
@@ -362,7 +642,7 @@ def run_once(
             progress=_progress_printer(enabled=not json_output),
             options=run_options,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
         _try_write_error_report(report_path, str(exc))
         _exit_with_error("run", exc, json_output)
 
@@ -384,20 +664,52 @@ def counts(
         "--json-output",
         help="Print JSON instead of a summary table.",
     ),
+    account: list[str] = typer.Option(
+        None,
+        "--account",
+        help="Account name or index from fake-track.toml. Can be repeated.",
+    ),
 ) -> None:
     """Show current completed run target counts."""
-    settings = _load_settings("counts", json_output)
-    client = CampusRunClient(settings)
+    accounts = _load_accounts("counts", json_output, selectors=account)
+    if not accounts:
+        raise typer.BadParameter("No account selected.")
 
-    try:
-        login = client.authenticate_user()
-        student_id = _extract_student_id(login.data)
-        run_counts = client.fetch_run_counts(student_id)
-        counts_payload = _build_counts_payload(student_id, run_counts.data)
-    except Exception as exc:  # noqa: BLE001
-        _exit_with_error("counts", exc, json_output)
+    failed = False
+    results: list[dict[str, object]] = []
+    for context in accounts:
+        client = CampusRunClient(context.settings)
+        try:
+            login = client.authenticate_user()
+            student_id = _extract_student_id(login.data)
+            run_counts = client.fetch_run_counts(student_id)
+            counts_payload = _build_counts_payload(student_id, run_counts.data)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+            failed = True
+            if json_output:
+                results.append({"account": context.label, "error": str(exc).strip()})
+                continue
+            error_console.print(f"[yellow]warning:[/yellow] {context.label}: {exc}")
+            continue
 
-    _print_counts(counts_payload, json_output=json_output)
+        if json_output:
+            results.append({"account": context.label, "counts": counts_payload})
+        else:
+            if len(accounts) > 1:
+                console.print(f"Account: {context.label}")
+            _print_counts(counts_payload, json_output=False)
+
+    if json_output and len(accounts) > 1:
+        typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    elif json_output and len(accounts) == 1 and results:
+        payload = results[0]
+        if "counts" in payload:
+            typer.echo(json.dumps(payload["counts"], ensure_ascii=False, indent=2))
+        else:
+            typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -407,18 +719,50 @@ def doctor(
         "--json-output",
         help="Print full JSON report instead of progress logs and summary table.",
     ),
+    account: list[str] = typer.Option(
+        None,
+        "--account",
+        help="Account name or index from fake-track.toml. Can be repeated.",
+    ),
 ) -> None:
     """Check login, route fetching, and createLine connectivity."""
-    settings = _load_settings("doctor", json_output)
+    accounts = _load_accounts("doctor", json_output, selectors=account)
+    if not accounts:
+        raise typer.BadParameter("No account selected.")
 
-    workflow = RunWorkflow(settings)
-    try:
-        report = workflow.run_connectivity(
-            progress=_progress_printer(enabled=not json_output)
-        )
-    except Exception as exc:  # noqa: BLE001
-        _exit_with_error("doctor", exc, json_output)
+    failed = False
+    results: list[dict[str, object]] = []
+    for context in accounts:
+        workflow = RunWorkflow(context.settings)
+        try:
+            report = workflow.run_connectivity(
+                progress=_progress_printer(enabled=not json_output)
+            )
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+            failed = True
+            if json_output:
+                results.append({"account": context.label, "error": str(exc).strip()})
+                continue
+            error_console.print(f"[yellow]warning:[/yellow] {context.label}: {exc}")
+            continue
 
-    _print_report(report, json_output=json_output, title="Doctor Summary")
-    if not report.success:
+        if json_output:
+            results.append({"account": context.label, "report": report.to_dict()})
+        else:
+            if len(accounts) > 1:
+                console.print(f"Account: {context.label}")
+            _print_report(report, json_output=False, title="Doctor Summary")
+            if not report.success:
+                failed = True
+
+    if json_output and len(accounts) > 1:
+        typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    elif json_output and len(accounts) == 1 and results:
+        payload = results[0]
+        if "report" in payload:
+            typer.echo(json.dumps(payload["report"], ensure_ascii=False, indent=2))
+        else:
+            typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    if failed:
         raise typer.Exit(1)

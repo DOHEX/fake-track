@@ -31,7 +31,7 @@ uv sync
 uv run fake-track run
 ```
 
-运行前至少填写 `.env` 中的三项必需配置：
+运行前至少填写 `.env` 中的配置：
 
 ```env
 FAKE_TRACK_KEY=
@@ -40,6 +40,7 @@ FAKE_TRACK_PASSWORD=
 ```
 
 `FAKE_TRACK_KEY` 也兼容旧名 `FAKE_TRACK_SECRET`，长度必须是 16/24/32 字节。
+如果使用 `fake-track.toml` 的 `[[accounts]]` 配置多账号，只需要设置 `FAKE_TRACK_KEY`。
 
 ## CLI 用法
 
@@ -61,6 +62,7 @@ FAKE_TRACK_PASSWORD=
 | `--skip-wait` | `run` | 不等待模拟跑步时长，直接提交 |
 | `--force-submit` | `run` | `checkRecord` 不通过时仍继续提交 |
 | `--ignore-target-met` | `run` | 当前次数目标已完成时仍继续跑 |
+| `--account NAME_OR_INDEX` | `run`, `counts`, `doctor` | 选择指定账号（可重复传入） |
 
 `encrypt` 只需要 `FAKE_TRACK_KEY` / `FAKE_TRACK_SECRET`，不要求配置手机号和密码。
 
@@ -73,6 +75,23 @@ FAKE_TRACK_PASSWORD=
 | `FAKE_TRACK_KEY` | AES key，也兼容旧名 `FAKE_TRACK_SECRET` |
 | `FAKE_TRACK_PHONE` | 手机号 |
 | `FAKE_TRACK_PASSWORD` | 密码 |
+
+多账号可以放在 `fake-track.toml` 的 `[[accounts]]` 中，手机号和密码从这里读取：
+
+```toml
+[[accounts]]
+name = "account-1"
+phone = ""
+password = ""
+
+[[accounts]]
+name = "account-2"
+phone = ""
+password = ""
+```
+
+`FAKE_TRACK_KEY` 仍然从环境变量读取，所有账号共用。
+`run` 默认并行执行所有账号，使用 `--account` 可选择单个账号。
 
 普通运行配置放 `fake-track.toml`。没有这个文件时会使用内置默认值；需要调整时可复制示例：
 

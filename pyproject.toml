@@ -1,6 +1,6 @@
 [project]
 name = "fake-track"
-version = "1.1.1"
+version = "1.2.0"
 description = "校园跑接口调试工具"
 readme = "README.md"
 authors = [
@@ -8,14 +8,14 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "cryptography>=46.0.6",
+    "cryptography>=47.0.0",
     "osmnx>=2.1.0",
-    "pydantic>=2.12.5",
-    "pydantic-settings>=2.13.1",
-    "rich>=13.9.4",
-    "requests>=2.32.3",
-    "typer>=0.24.1",
-    "matplotlib>=3.10.8",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "rich>=15.0.0",
+    "requests>=2.33.1",
+    "typer>=0.25.0",
+    "matplotlib>=3.10.9",
 ]
 
 [project.scripts]
@@ -30,6 +30,6 @@ select = ["I"]
 
 [dependency-groups]
 dev = [
-    "prek>=0.3.8",
-    "ruff>=0.15.0",
+    "prek>=0.3.11",
+    "ruff>=0.15.12",
 ]

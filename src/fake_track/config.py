@@ -88,6 +88,22 @@ class CredentialSettings(BaseSettings):
         return _validate_aes_key(value)
 
 
+class AccountConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    phone: str
+    password: str
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _normalize_name(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
 class NetworkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -182,6 +198,8 @@ class FileSettings(BaseSettings):
         extra="forbid",
     )
 
+    accounts: list[AccountConfig] = Field(default_factory=list)
+
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     route: RouteConfig = Field(default_factory=RouteConfig)
@@ -208,6 +226,7 @@ class FileSettings(BaseSettings):
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    account_name: str | None = None
     phone: str
     password: str
     run_key: str
@@ -229,11 +248,50 @@ class Settings(BaseModel):
             credentials = CredentialSettings()
             file_settings = FileSettings()
             return cls(
+                account_name=None,
                 phone=credentials.phone,
                 password=credentials.password,
                 run_key=credentials.run_key,
-                **file_settings.model_dump(),
+                **file_settings.model_dump(exclude={"accounts"}),
             )
+        except ValidationError as exc:
+            raise ConfigError(
+                "Invalid configuration:\n- " + _format_validation_error(exc)
+            ) from exc
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"Invalid TOML config {CONFIG_PATH}: {exc}") from exc
+        except OSError as exc:
+            raise ConfigError(f"Cannot read config {CONFIG_PATH}: {exc}") from exc
+
+    @classmethod
+    def load_all(cls) -> list["Settings"]:
+        try:
+            file_settings = FileSettings()
+            base_payload = file_settings.model_dump(exclude={"accounts"})
+            accounts = list(file_settings.accounts)
+            if accounts:
+                crypto = CryptoSettings.from_env()
+                return [
+                    cls(
+                        account_name=account.name,
+                        phone=account.phone,
+                        password=account.password,
+                        run_key=crypto.run_key,
+                        **base_payload,
+                    )
+                    for account in accounts
+                ]
+
+            credentials = CredentialSettings()
+            return [
+                cls(
+                    account_name=None,
+                    phone=credentials.phone,
+                    password=credentials.password,
+                    run_key=credentials.run_key,
+                    **base_payload,
+                )
+            ]
         except ValidationError as exc:
             raise ConfigError(
                 "Invalid configuration:\n- " + _format_validation_error(exc)

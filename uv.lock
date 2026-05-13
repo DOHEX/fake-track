@@ -226,7 +226,7 @@ wheels = [
 
 [[package]]
 name = "fake-track"
-version = "1.0.0"
+version = "1.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -247,20 +247,20 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=46.0.6" },
-    { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "cryptography", specifier = ">=47.0.0" },
+    { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "osmnx", specifier = ">=2.1.0" },
-    { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
-    { name = "requests", specifier = ">=2.32.3" },
-    { name = "rich", specifier = ">=13.9.4" },
-    { name = "typer", specifier = ">=0.24.1" },
+    { name = "pydantic", specifier = ">=2.13.3" },
+    { name = "pydantic-settings", specifier = ">=2.14.0" },
+    { name = "requests", specifier = ">=2.33.1" },
+    { name = "rich", specifier = ">=15.0.0" },
+    { name = "typer", specifier = ">=0.25.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "prek", specifier = ">=0.3.8" },
-    { name = "ruff", specifier = ">=0.15.0" },
+    { name = "prek", specifier = ">=0.3.11" },
+    { name = "ruff", specifier = ">=0.15.12" },
 ]
 
 [[package]]

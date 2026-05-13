@@ -60,6 +60,7 @@ class RunExecutionOptions:
     force_submit: bool = False
     ignore_target_met: bool = False
     track_image_path: str | None = None
+    disable_progress: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -720,7 +721,7 @@ class RunWorkflow:
             )
             self._emit(progress, f"Track image saved: {track_image}")
             return track_image
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
             self._emit(progress, f"Track image skipped: {exc}")
         return None
 
@@ -859,6 +860,7 @@ class RunWorkflow:
         self,
         run_duration_sec: int,
         skip_wait: bool,
+        disable_progress: bool,
         progress: ProgressCallback | None,
     ) -> None:
         if skip_wait:
@@ -875,7 +877,7 @@ class RunWorkflow:
             f"Simulate running before submit: {self._format_seconds(wait_sec)}",
         )
         remaining = wait_sec
-        if progress is None:
+        if progress is None or disable_progress:
             while remaining > 0:
                 sleep_sec = min(15.0, remaining)
                 time.sleep(sleep_sec)
@@ -1023,6 +1025,7 @@ class RunWorkflow:
         self._wait_before_submit(
             run_duration_sec=track.run_data.duration_sec,
             skip_wait=run_options.skip_submit_wait,
+            disable_progress=run_options.disable_progress,
             progress=progress,
         )
 
@@ -1059,6 +1062,7 @@ class RunWorkflow:
         uploaded_batches = self._upload_batches(
             record_id,
             track.upload_points,
+            run_options.disable_progress,
             progress,
         )
 
@@ -1096,6 +1100,7 @@ class RunWorkflow:
         self,
         record_id: int,
         points: list[TrackPoint],
+        disable_progress: bool,
         progress: ProgressCallback | None = None,
     ) -> int:
         if not points:
@@ -1104,7 +1109,7 @@ class RunWorkflow:
         total_batches = (len(points) + UPLOAD_BATCH_SIZE - 1) // UPLOAD_BATCH_SIZE
         uploaded = 0
 
-        if progress is None:
+        if progress is None or disable_progress:
             for segment in batched(points, UPLOAD_BATCH_SIZE):
                 self._upload_batch(record_id, segment)
                 uploaded += 1
