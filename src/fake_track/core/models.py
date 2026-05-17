@@ -32,6 +32,25 @@ class RunType(Enum):
     NORMAL = "normal"
 
 
+def classify_run_type(dt: datetime) -> RunType | None:
+    hour = dt.hour + dt.minute / 60.0
+    if 6.0 <= hour < 7.0:
+        return RunType.MORNING
+    if 7.0 <= hour < 22.0:
+        return RunType.NORMAL
+    return None
+
+
+def semester_for(dt: datetime) -> str:
+    year = dt.year
+    month = dt.month
+    if month >= 9:
+        return f"{year}-{year + 1} 第一学期"
+    if month <= 7:
+        return f"{year - 1}-{year} 第二学期"
+    return f"{year}-{year + 1} 暑假"
+
+
 @dataclass(slots=True, frozen=True)
 class TrackFilterPolicy:
     max_speed_threshold_m_s: float = 10.0
@@ -68,6 +87,22 @@ class RunCounts:
     normal: int
     effective: int
     target_effective: int
+
+
+@dataclass(slots=True)
+class RecordItem:
+    id: int
+    running_time: int
+    status: int
+    mileage: float
+    speed: str
+    kcal: str
+    step_frequency: int
+    motto: str
+    path_image: str
+    start_time: str
+    end_time: str
+    pub_time: str
 
 
 def format_timestamp_ms(timestamp_ms: int) -> str:

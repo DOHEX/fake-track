@@ -1,3 +1,4 @@
+import os
 import tomllib
 from pathlib import Path
 
@@ -37,6 +38,26 @@ def _format_validation_error(exc: ValidationError) -> str:
         message = item.get("msg", "invalid value")
         details.append(f"{location}: {message}" if location else str(message))
     return "\n- ".join(details) if details else str(exc)
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_option(
+    account_value: bool | None,
+    env_key: str,
+    global_default: bool,
+) -> bool:
+    if account_value is not None:
+        return account_value
+    env_value = os.environ.get(env_key)
+    if env_value is not None:
+        return env_value.strip().lower() in ("1", "true", "yes", "on")
+    return global_default
 
 
 class CryptoSettings(BaseSettings):
@@ -94,6 +115,9 @@ class AccountConfig(BaseModel):
     name: str | None = None
     phone: str
     password: str
+    skip_wait: bool | None = None
+    force_submit: bool | None = None
+    ignore_target_met: bool | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -192,6 +216,14 @@ class OutputConfig(BaseModel):
         return str(value)
 
 
+class OptionsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skip_wait: bool = False
+    force_submit: bool = False
+    ignore_target_met: bool = False
+
+
 class FileSettings(BaseSettings):
     model_config = SettingsConfigDict(
         toml_file=CONFIG_PATH,
@@ -206,6 +238,7 @@ class FileSettings(BaseSettings):
     points: PointsConfig = Field(default_factory=PointsConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    options: OptionsConfig = Field(default_factory=OptionsConfig)
 
     @classmethod
     def settings_customise_sources(
@@ -230,6 +263,9 @@ class Settings(BaseModel):
     phone: str
     password: str
     run_key: str
+    skip_wait: bool = False
+    force_submit: bool = False
+    ignore_target_met: bool = False
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     route: RouteConfig = Field(default_factory=RouteConfig)
@@ -247,12 +283,18 @@ class Settings(BaseModel):
         try:
             credentials = CredentialSettings()
             file_settings = FileSettings()
+            options = file_settings.options
             return cls(
                 account_name=None,
                 phone=credentials.phone,
                 password=credentials.password,
                 run_key=credentials.run_key,
-                **file_settings.model_dump(exclude={"accounts"}),
+                skip_wait=_env_bool("FAKE_TRACK_SKIP_WAIT", options.skip_wait),
+                force_submit=_env_bool("FAKE_TRACK_FORCE_SUBMIT", options.force_submit),
+                ignore_target_met=_env_bool(
+                    "FAKE_TRACK_IGNORE_TARGET_MET", options.ignore_target_met
+                ),
+                **file_settings.model_dump(exclude={"accounts", "options"}),
             )
         except ValidationError as exc:
             raise ConfigError(
@@ -267,7 +309,8 @@ class Settings(BaseModel):
     def load_all(cls) -> list["Settings"]:
         try:
             file_settings = FileSettings()
-            base_payload = file_settings.model_dump(exclude={"accounts"})
+            base_payload = file_settings.model_dump(exclude={"accounts", "options"})
+            global_opts = file_settings.options
             accounts = list(file_settings.accounts)
             if accounts:
                 crypto = CryptoSettings.from_env()
@@ -277,6 +320,21 @@ class Settings(BaseModel):
                         phone=account.phone,
                         password=account.password,
                         run_key=crypto.run_key,
+                        skip_wait=_resolve_option(
+                            account.skip_wait,
+                            "FAKE_TRACK_SKIP_WAIT",
+                            global_opts.skip_wait,
+                        ),
+                        force_submit=_resolve_option(
+                            account.force_submit,
+                            "FAKE_TRACK_FORCE_SUBMIT",
+                            global_opts.force_submit,
+                        ),
+                        ignore_target_met=_resolve_option(
+                            account.ignore_target_met,
+                            "FAKE_TRACK_IGNORE_TARGET_MET",
+                            global_opts.ignore_target_met,
+                        ),
                         **base_payload,
                     )
                     for account in accounts
@@ -289,6 +347,13 @@ class Settings(BaseModel):
                     phone=credentials.phone,
                     password=credentials.password,
                     run_key=credentials.run_key,
+                    skip_wait=_env_bool("FAKE_TRACK_SKIP_WAIT", global_opts.skip_wait),
+                    force_submit=_env_bool(
+                        "FAKE_TRACK_FORCE_SUBMIT", global_opts.force_submit
+                    ),
+                    ignore_target_met=_env_bool(
+                        "FAKE_TRACK_IGNORE_TARGET_MET", global_opts.ignore_target_met
+                    ),
                     **base_payload,
                 )
             ]

@@ -27,6 +27,7 @@ from .models import (
     TrackFilterPolicy,
     TrackGenerationRequest,
     TrackPoint,
+    classify_run_type,
 )
 from .payloads import build_path_upload_payload, build_run_summary_payload
 from .track_generator import TrackGenerator
@@ -134,13 +135,7 @@ class RunWorkflow:
 
     @staticmethod
     def _classify_run_type() -> RunType | None:
-        now = datetime.now()
-        time_decimal = now.hour + now.minute / 60.0 + now.second / 3600.0
-        if 6.0 <= time_decimal < 7.0:
-            return RunType.MORNING
-        if 7.0 <= time_decimal < 22.0:
-            return RunType.NORMAL
-        return None
+        return classify_run_type(datetime.now())
 
     @staticmethod
     def _check_target_counts(
@@ -897,42 +892,6 @@ class RunWorkflow:
                 time.sleep(sleep_sec)
                 remaining -= sleep_sec
                 progress_bar.update(task_id, advance=sleep_sec)
-
-    def run_connectivity(self, progress: ProgressCallback | None = None) -> RunReport:
-        self._emit(progress, "Step 1/3: login")
-        login = self.client.authenticate_user()
-        login_data = login.data if isinstance(login.data, dict) else {}
-        student_id, _ = self._extract_server_limits(login_data)
-
-        self._emit(progress, "Step 2/3: fetch route points")
-        route = self.client.fetch_route_points(
-            self.settings.run.start_lat, self.settings.run.start_lng
-        )
-        points = route.data if isinstance(route.data, list) else []
-
-        self._emit(progress, "Step 3/3: create record")
-        line = self.client.create_run_record(student_id=student_id, pass_points=points)
-        record_id = int((line.data or {}).get("record_id", 0))
-
-        report = RunReport(
-            success=record_id > 0,
-            mode="connectivity",
-            record_id=record_id,
-            summary={
-                "student_id": student_id,
-                "pass_point_count": len(points),
-                "record_id": record_id,
-            },
-            server={
-                "login": login.raw,
-                "randrunInfo": route.raw,
-                "createLine": line.raw,
-            },
-            warning=None,
-        )
-        self._write_report(report)
-        self._emit(progress, f"Connectivity done, record_id={record_id}")
-        return report
 
     def run_full(
         self,

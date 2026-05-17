@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal
 
 import requests
@@ -47,6 +50,7 @@ _UPLOAD_PATH_POINT = _Endpoint("POST", "/uploadPathPointV3/")
 _RECORD_INFO = _Endpoint("GET", "/recordInfo/")
 _GET_PATH_POINTS = _Endpoint("GET", "/GetPathPoints/")
 _RUNNING_DATA = _Endpoint("GET", "/RunningData/")
+_RECORD_LIST_NEW = _Endpoint("GET", "/recordListNew/")
 
 
 class CampusRunClient:
@@ -56,6 +60,15 @@ class CampusRunClient:
         self.session_id = ""
 
     def authenticate_user(self) -> ApiResponse:
+        key = self.settings.phone
+        with _session_lock:
+            if not _session_cache:
+                _session_cache.update(_load_session_cache())
+            if key in _session_cache:
+                sid, _ = _session_cache[key]
+                self.session_id = sid
+                return ApiResponse(code=1, message="cached", data={}, raw={})
+
         response = self._request(
             _LOGIN,
             {
@@ -102,6 +115,9 @@ class CampusRunClient:
 
     def fetch_run_counts(self, student_id: int) -> ApiResponse:
         return self._request(_RUNNING_DATA, {"id": student_id})
+
+    def fetch_record_list(self, page: int = 1, size: int = 10) -> ApiResponse:
+        return self._request(_RECORD_LIST_NEW, {"page": page, "size": size})
 
     def _request(
         self,
@@ -216,3 +232,61 @@ class CampusRunClient:
         if code != 1:
             raise ApiError(message or f"API error code={code} endpoint={endpoint.path}")
         return ApiResponse(code=code, message=message, data=data, raw=body)
+
+
+# -- session cache ---------------------------------------------------------
+
+_SESSION_CACHE_FILE = Path(".local") / "session_cache.json"
+_session_cache: dict[str, tuple[str, int]] = {}  # phone -> (session_id, student_id)
+_session_lock = threading.Lock()
+
+
+def _load_session_cache() -> dict[str, tuple[str, int]]:
+    if not _SESSION_CACHE_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(_SESSION_CACHE_FILE.read_text(encoding="utf-8"))
+        return {k: (str(v[0]), int(v[1])) for k, v in raw.items()}
+    except json.JSONDecodeError, KeyError, ValueError, IndexError, OSError:
+        return {}
+
+
+def _save_session_cache() -> None:
+    _SESSION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {k: [v[0], v[1]] for k, v in _session_cache.items()}
+    _SESSION_CACHE_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _extract_student_id(login_data: object) -> int:
+    if not isinstance(login_data, dict):
+        raise ApiError(
+            f"Login response data is not a dict: {type(login_data).__name__}"
+        )
+    student_id = int(login_data.get("id", 0))
+    if not student_id:
+        raise ApiError("Login response missing student id")
+    return student_id
+
+
+def get_authenticated_client(settings: Settings) -> tuple[CampusRunClient, int]:
+    key = settings.phone
+    with _session_lock:
+        if not _session_cache:
+            _session_cache.update(_load_session_cache())
+        if key in _session_cache:
+            sid, uid = _session_cache[key]
+            client = CampusRunClient(settings)
+            client.session_id = sid
+            return client, uid
+
+    client = CampusRunClient(settings)
+    login = client.authenticate_user()
+    sid = client.session_id
+    uid = _extract_student_id(login.data)
+    if sid and uid:
+        with _session_lock:
+            _session_cache[key] = (sid, uid)
+            _save_session_cache()
+    return client, uid

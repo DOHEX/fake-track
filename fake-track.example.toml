@@ -1,7 +1,13 @@
+[options]
+skip_wait = false
+force_submit = false
+ignore_target_met = false
+
 [[accounts]]
 name = "account-1"
 phone = ""
 password = ""
+# skip_wait = true       # optional per-account override
 
 [[accounts]]
 name = "account-2"

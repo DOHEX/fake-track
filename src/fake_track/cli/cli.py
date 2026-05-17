@@ -11,10 +11,12 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from .client import ApiError, CampusRunClient
-from .config import ConfigError, CryptoSettings, Settings
-from .crypto import aes_encrypt
-from .workflow import RunExecutionOptions, RunReport, RunWorkflow
+from fake_track.core.client import ApiError, CampusRunClient, get_authenticated_client
+from fake_track.core.config import ConfigError, CryptoSettings, Settings
+from fake_track.core.crypto import aes_encrypt
+from fake_track.core.models import RunType, classify_run_type, semester_for
+from fake_track.core.workflow import RunExecutionOptions, RunReport, RunWorkflow
+from fake_track.web import serve as run_web_server
 
 app = typer.Typer(help="fake-track campus run API test tool")
 console = Console()
@@ -457,18 +459,6 @@ def _load_accounts(
     return _select_accounts(contexts, selectors)
 
 
-def _extract_student_id(login_data: object) -> int:
-    if not isinstance(login_data, dict):
-        raise ApiError(
-            f"Login response data is not a dict: {type(login_data).__name__}"
-        )
-
-    student_id = int(login_data.get("id", 0))
-    if not student_id:
-        raise ApiError("Login response missing student id")
-    return student_id
-
-
 def _build_counts_payload(
     student_id: int, counts_data: object
 ) -> dict[str, int | bool]:
@@ -506,6 +496,17 @@ def encrypt(
     console.print(aes_encrypt(text, settings.run_key))
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", help="Port to listen on."),
+    reload: bool = typer.Option(False, "--reload", help="Enable auto-reload."),
+    log_level: str = typer.Option("info", "--log-level", help="Uvicorn log level."),
+) -> None:
+    """Start the local web UI."""
+    run_web_server(host=host, port=port, reload=reload, log_level=log_level)
+
+
 @app.command("run")
 def run_once(
     json_output: bool = typer.Option(
@@ -528,21 +529,20 @@ def run_once(
         "--report-path",
         help="Write the full JSON report to a file while keeping console logs.",
     ),
-    skip_wait: bool = typer.Option(
-        False,
-        "--skip-wait",
+    skip_wait: bool | None = typer.Option(
+        None,
+        "--skip-wait/--no-skip-wait",
         help="Skip the simulated run-duration wait before submit.",
     ),
-    force_submit: bool = typer.Option(
-        False,
-        "--force-submit",
+    force_submit: bool | None = typer.Option(
+        None,
+        "--force-submit/--no-force-submit",
         help="Continue update/upload even when checkRecord rejects the payload.",
     ),
-    ignore_target_met: bool = typer.Option(
-        False,
-        "--ignore-target-met",
+    ignore_target_met: bool | None = typer.Option(
+        None,
+        "--ignore-target-met/--no-ignore-target-met",
         help="Run even when the current target count is already met.",
-        envvar="FAKE_TRACK_IGNORE_TARGET_MET",
     ),
     account: list[str] = typer.Option(
         None,
@@ -578,9 +578,15 @@ def run_once(
             )
             workflow = RunWorkflow(settings)
             run_options = RunExecutionOptions(
-                skip_submit_wait=skip_wait,
-                force_submit=force_submit,
-                ignore_target_met=ignore_target_met,
+                skip_submit_wait=skip_wait
+                if skip_wait is not None
+                else settings.skip_wait,
+                force_submit=force_submit
+                if force_submit is not None
+                else settings.force_submit,
+                ignore_target_met=ignore_target_met
+                if ignore_target_met is not None
+                else settings.ignore_target_met,
                 track_image_path=image_path,
                 disable_progress=True,
             )
@@ -630,9 +636,13 @@ def run_once(
 
     workflow = RunWorkflow(settings)
     run_options = RunExecutionOptions(
-        skip_submit_wait=skip_wait,
-        force_submit=force_submit,
-        ignore_target_met=ignore_target_met,
+        skip_submit_wait=skip_wait if skip_wait is not None else settings.skip_wait,
+        force_submit=force_submit
+        if force_submit is not None
+        else settings.force_submit,
+        ignore_target_met=ignore_target_met
+        if ignore_target_met is not None
+        else settings.ignore_target_met,
         track_image_path=image_path,
         disable_progress=False,
     )
@@ -657,6 +667,127 @@ def run_once(
         raise typer.Exit(1)
 
 
+_RUN_TYPE_LABELS: dict[RunType | None, str] = {
+    RunType.MORNING: "晨跑",
+    RunType.NORMAL: "普跑",
+    None: "—",
+}
+
+
+def _annotate_record(record: dict[str, object]) -> dict[str, object]:
+    start = str(record.get("start_time", "") or "")
+    try:
+        dt = datetime.strptime(start[:19], "%Y-%m-%d %H:%M:%S")
+        record["_run_type"] = classify_run_type(dt)
+        record["_semester"] = semester_for(dt)
+    except ValueError:
+        record["_run_type"] = None
+        record["_semester"] = ""
+    return record
+
+
+def _filter_records(
+    records: list[dict[str, object]],
+    run_type: str | None,
+    status: str | None,
+    semester: str | None,
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for r in records:
+        if run_type:
+            rt = r.get("_run_type")
+            if run_type == "morning" and rt is not RunType.MORNING:
+                continue
+            if run_type == "normal" and rt is not RunType.NORMAL:
+                continue
+        if status:
+            sc = int(r.get("status", 0))
+            if status == "valid" and sc != 1:
+                continue
+            if status == "invalid" and sc != 2:
+                continue
+        if semester:
+            if str(r.get("_semester", "")) != semester:
+                continue
+        out.append(r)
+    return out
+
+
+def _build_record_list_payload(resp_data: object) -> dict[str, object]:
+    if not isinstance(resp_data, dict):
+        raise ApiError(
+            f"Record list response data is not a dict: {type(resp_data).__name__}"
+        )
+    raw = resp_data.get("list", [])
+    records = [_annotate_record(dict(r)) for r in raw]  # type: ignore[arg-type]
+    return {
+        "list": records,
+        "page": int(resp_data.get("page", 1)),
+        "total": int(resp_data.get("total", 0)),
+    }
+
+
+def _print_record_list(
+    records: list[dict[str, object]],
+    page: int,
+    total: int,
+    json_output: bool,
+    account_label: str | None = None,
+    filter_tags: str = "",
+) -> None:
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"records": records, "page": page, "total": total},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    if not records:
+        console.print("[yellow]No records found.[/yellow]")
+        return
+
+    title = f"Records (page {page})"
+    if filter_tags:
+        title += f"  [{filter_tags}]"
+    if account_label:
+        title += f" -- {account_label}"
+
+    table = Table(title=title, box=box.ASCII)
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Start", style="white")
+    table.add_column("End", style="white")
+    table.add_column("Mileage", style="white", justify="right")
+    table.add_column("Speed", style="white", justify="right")
+    table.add_column("Status", style="white")
+    table.add_column("Type", style="white")
+
+    status_labels = {1: "达标", 2: "无效"}
+
+    for r in records:
+        mileage_m = float(r.get("mileage", 0) or 0)
+        status_code = int(r.get("status", 0))
+        run_type = r.get("_run_type")
+        type_label = _RUN_TYPE_LABELS.get(run_type, "—")  # type: ignore[arg-type]
+
+        table.add_row(
+            str(r.get("id", "")),
+            str(r.get("start_time", "")),
+            str(r.get("end_time", "")),
+            f"{mileage_m / 1000:.2f} km" if mileage_m else "-",
+            str(r.get("speed", "-")),
+            status_labels.get(status_code, str(status_code)),
+            type_label,
+        )
+
+    console.print(table)
+    if total > 0:
+        console.print(f"[dim]Total records: {total}[/dim]")
+
+
 @app.command()
 def counts(
     json_output: bool = typer.Option(
@@ -678,10 +809,8 @@ def counts(
     failed = False
     results: list[dict[str, object]] = []
     for context in accounts:
-        client = CampusRunClient(context.settings)
         try:
-            login = client.authenticate_user()
-            student_id = _extract_student_id(login.data)
+            client, student_id = get_authenticated_client(context.settings)
             run_counts = client.fetch_run_counts(student_id)
             counts_payload = _build_counts_payload(student_id, run_counts.data)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
@@ -713,11 +842,28 @@ def counts(
 
 
 @app.command()
-def doctor(
+def recordlist(
+    page: int = typer.Option(1, "--page", help="Page number for pagination."),
+    size: int = typer.Option(10, "--size", help="Number of records per page."),
     json_output: bool = typer.Option(
         False,
         "--json-output",
-        help="Print full JSON report instead of progress logs and summary table.",
+        help="Print JSON instead of a summary table.",
+    ),
+    run_type: str = typer.Option(
+        "",
+        "--run-type",
+        help="Filter by run type: morning, normal.",
+    ),
+    status: str = typer.Option(
+        "",
+        "--status",
+        help="Filter by validity: valid, invalid.",
+    ),
+    semester: str = typer.Option(
+        "",
+        "--semester",
+        help='Filter by semester, e.g. "2025-2026 第二学期".',
     ),
     account: list[str] = typer.Option(
         None,
@@ -725,20 +871,30 @@ def doctor(
         help="Account name or index from fake-track.toml. Can be repeated.",
     ),
 ) -> None:
-    """Check login, route fetching, and createLine connectivity."""
-    accounts = _load_accounts("doctor", json_output, selectors=account)
+    """Show running records for one or more accounts."""
+    accounts = _load_accounts("recordlist", json_output, selectors=account)
     if not accounts:
         raise typer.BadParameter("No account selected.")
 
+    # build filter tag for display
+    tags: list[str] = []
+    if run_type:
+        tags.append({"morning": "晨跑", "normal": "普跑"}.get(run_type, run_type))
+    if status:
+        tags.append({"valid": "达标", "invalid": "无效"}.get(status, status))
+    if semester:
+        tags.append(semester)
+    filter_tags = " · ".join(tags)
+
     failed = False
     results: list[dict[str, object]] = []
+
     for context in accounts:
-        workflow = RunWorkflow(context.settings)
         try:
-            report = workflow.run_connectivity(
-                progress=_progress_printer(enabled=not json_output)
-            )
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+            client, _ = get_authenticated_client(context.settings)
+            resp = client.fetch_record_list(page=page, size=size)
+            payload = _build_record_list_payload(resp.data)
+        except Exception as exc:  # noqa: BLE001
             failed = True
             if json_output:
                 results.append({"account": context.label, "error": str(exc).strip()})
@@ -746,23 +902,37 @@ def doctor(
             error_console.print(f"[yellow]warning:[/yellow] {context.label}: {exc}")
             continue
 
+        filtered = _filter_records(
+            payload["list"], run_type or None, status or None, semester or None
+        )
+        filtered_count = len(filtered)
+
         if json_output:
-            results.append({"account": context.label, "report": report.to_dict()})
+            results.append(
+                {
+                    "account": context.label,
+                    "page": payload["page"],
+                    "total": payload["total"],
+                    "filtered": filtered_count,
+                    "records": filtered,
+                }
+            )
         else:
             if len(accounts) > 1:
                 console.print(f"Account: {context.label}")
-            _print_report(report, json_output=False, title="Doctor Summary")
-            if not report.success:
-                failed = True
+            _print_record_list(
+                records=filtered,
+                page=payload["page"],
+                total=filtered_count,
+                json_output=False,
+                account_label=context.label if len(accounts) > 1 else None,
+                filter_tags=filter_tags,
+            )
 
     if json_output and len(accounts) > 1:
-        typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+        typer.echo(json.dumps(results, ensure_ascii=False, indent=2, default=str))
     elif json_output and len(accounts) == 1 and results:
-        payload = results[0]
-        if "report" in payload:
-            typer.echo(json.dumps(payload["report"], ensure_ascii=False, indent=2))
-        else:
-            typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        typer.echo(json.dumps(results[0], ensure_ascii=False, indent=2, default=str))
 
     if failed:
         raise typer.Exit(1)
