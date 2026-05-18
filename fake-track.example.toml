@@ -19,14 +19,14 @@ start_lat = 30.83378
 start_lng = 121.504532
 target_distance_km = 2.03
 target_pace_min_per_km = 6.0
-target_duration_min_sec = 460
-target_duration_max_sec = 490
 sample_interval_sec = 1
 must_pass_radius_km = 0.05
-compensation_factor = 1.0
-device_brand = ""
 distance_jitter_ratio = 0.03
 pace_jitter_ratio = 0.08
+point_accuracy_min = 8
+point_accuracy_max = 25
+point_jitter_m = 2.5
+timestamp_jitter_ms = 220
 
 [route]
 road_routing_enabled = true
@@ -40,12 +40,6 @@ report_path = ""
 [network]
 timeout_sec = 20
 retry_count = 3
-
-[points]
-point_accuracy_min = 8
-point_accuracy_max = 25
-point_jitter_m = 2.5
-timestamp_jitter_ms = 220
 
 [guard]
 max_speed_threshold_m_s = 10.0

@@ -15,6 +15,13 @@ from fake_track.core.client import ApiError, CampusRunClient, get_authenticated_
 from fake_track.core.config import ConfigError, CryptoSettings, Settings
 from fake_track.core.crypto import aes_encrypt
 from fake_track.core.models import RunType, classify_run_type, semester_for
+from fake_track.core.utils import (
+    annotate_records,
+    build_counts_payload,
+    default_track_image_path,
+    filter_records,
+    mask_phone,
+)
 from fake_track.core.workflow import RunExecutionOptions, RunReport, RunWorkflow
 from fake_track.web import serve as run_web_server
 
@@ -37,22 +44,10 @@ class AccountRunResult:
     report: RunReport
 
 
-def _default_track_image_path() -> Path:
-    default_name = datetime.now().strftime("track-overlay-%Y%m%d-%H%M%S.png")
-    return Path(".local") / "debug-images" / default_name
-
-
 def _with_account_suffix(path: Path, slug: str) -> Path:
     if not slug:
         return path
     return path.with_name(f"{path.stem}-{slug}{path.suffix}")
-
-
-def _mask_phone(phone: str) -> str:
-    text = phone.strip()
-    if len(text) <= 4:
-        return text
-    return f"****{text[-4:]}"
 
 
 def _slugify(value: str) -> str:
@@ -62,7 +57,7 @@ def _slugify(value: str) -> str:
 
 def _account_display_label(settings: Settings, index: int) -> str:
     name = settings.account_name or f"account-{index}"
-    return f"{name} ({_mask_phone(settings.phone)})"
+    return f"{name} ({mask_phone(settings.phone)})"
 
 
 def _account_slug(settings: Settings, index: int) -> str:
@@ -358,7 +353,7 @@ def _resolve_track_image_path(
     if track_image_path is None and not track_image:
         return None
 
-    base = track_image_path or _default_track_image_path()
+    base = track_image_path or default_track_image_path()
     if multi_run:
         base = _with_account_suffix(base, account.slug)
     return str(base)
@@ -375,7 +370,7 @@ def _build_multi_report(
             {
                 "index": item.account.index,
                 "name": item.account.settings.account_name,
-                "phone": _mask_phone(item.account.settings.phone),
+                "phone": mask_phone(item.account.settings.phone),
                 "label": item.account.label,
                 "report": item.report.to_dict(),
             }
@@ -457,29 +452,6 @@ def _load_accounts(
 
     contexts = _build_account_contexts(settings_list)
     return _select_accounts(contexts, selectors)
-
-
-def _build_counts_payload(
-    student_id: int, counts_data: object
-) -> dict[str, int | bool]:
-    if not isinstance(counts_data, dict):
-        raise ApiError(
-            f"Run counts response data is not a dict: {type(counts_data).__name__}"
-        )
-
-    morning = int(counts_data.get("morning", 0))
-    normal = int(counts_data.get("universal", 0))
-    effective = int(counts_data.get("effective", 0))
-    target_effective = int(counts_data.get("target_effective", 0))
-    return {
-        "student_id": student_id,
-        "morning": morning,
-        "normal": normal,
-        "effective": effective,
-        "completed_target_count": effective,
-        "target_effective": target_effective,
-        "target_met": target_effective > 0 and effective >= target_effective,
-    }
 
 
 @app.command()
@@ -674,52 +646,13 @@ _RUN_TYPE_LABELS: dict[RunType | None, str] = {
 }
 
 
-def _annotate_record(record: dict[str, object]) -> dict[str, object]:
-    start = str(record.get("start_time", "") or "")
-    try:
-        dt = datetime.strptime(start[:19], "%Y-%m-%d %H:%M:%S")
-        record["_run_type"] = classify_run_type(dt)
-        record["_semester"] = semester_for(dt)
-    except ValueError:
-        record["_run_type"] = None
-        record["_semester"] = ""
-    return record
-
-
-def _filter_records(
-    records: list[dict[str, object]],
-    run_type: str | None,
-    status: str | None,
-    semester: str | None,
-) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for r in records:
-        if run_type:
-            rt = r.get("_run_type")
-            if run_type == "morning" and rt is not RunType.MORNING:
-                continue
-            if run_type == "normal" and rt is not RunType.NORMAL:
-                continue
-        if status:
-            sc = int(r.get("status", 0))
-            if status == "valid" and sc != 1:
-                continue
-            if status == "invalid" and sc != 2:
-                continue
-        if semester:
-            if str(r.get("_semester", "")) != semester:
-                continue
-        out.append(r)
-    return out
-
-
 def _build_record_list_payload(resp_data: object) -> dict[str, object]:
     if not isinstance(resp_data, dict):
         raise ApiError(
             f"Record list response data is not a dict: {type(resp_data).__name__}"
         )
     raw = resp_data.get("list", [])
-    records = [_annotate_record(dict(r)) for r in raw]  # type: ignore[arg-type]
+    records = annotate_records([dict(r) for r in raw])  # type: ignore[arg-type]
     return {
         "list": records,
         "page": int(resp_data.get("page", 1)),
@@ -812,7 +745,7 @@ def counts(
         try:
             client, student_id = get_authenticated_client(context.settings)
             run_counts = client.fetch_run_counts(student_id)
-            counts_payload = _build_counts_payload(student_id, run_counts.data)
+            counts_payload = build_counts_payload(student_id, run_counts.data)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
             failed = True
             if json_output:
@@ -902,7 +835,7 @@ def recordlist(
             error_console.print(f"[yellow]warning:[/yellow] {context.label}: {exc}")
             continue
 
-        filtered = _filter_records(
+        filtered = filter_records(
             payload["list"], run_type or None, status or None, semester or None
         )
         filtered_count = len(filtered)

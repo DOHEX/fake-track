@@ -109,16 +109,6 @@ class FullRunResponses:
 
 
 class RunWorkflow:
-    _DEVICE_COMPENSATION: dict[str, float] = {
-        "oppo": 1.08,
-        "realme": 1.08,
-        "oneplus": 1.08,
-        "vivo": 1.07,
-        "iqoo": 1.07,
-        "xiaomi": 1.06,
-        "redmi": 1.06,
-    }
-
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = CampusRunClient(settings)
@@ -321,21 +311,6 @@ class RunWorkflow:
 
         return None
 
-    def _resolve_compensation_factor(self) -> float:
-        run_config = self.settings.run
-        brand = (run_config.device_brand or "").strip().lower()
-        if not brand:
-            return float(run_config.compensation_factor)
-
-        if "honor" in brand:
-            return 1.06
-
-        for key, factor in self._DEVICE_COMPENSATION.items():
-            if key in brand:
-                return factor
-
-        return float(run_config.compensation_factor)
-
     def _extract_server_limits(
         self, login_data: dict[str, Any]
     ) -> tuple[int, ServerRunLimits]:
@@ -383,17 +358,12 @@ class RunWorkflow:
     def _build_target_plan(
         self,
         limits: ServerRunLimits,
-        compensation_factor: float,
     ) -> RunTargetPlan:
         run_config = self.settings.run
         guard_config = self.settings.guard
         hard_distance_floor_km = max(2.0, limits.required_distance_km)
-        compensated_required_km = limits.required_distance_km / max(
-            0.01, compensation_factor
-        )
         distance_guard_min_km = max(
             hard_distance_floor_km,
-            compensated_required_km,
             limits.required_distance_km
             * max(0.0, guard_config.distance_tolerance_ratio),
         )
@@ -402,10 +372,7 @@ class RunWorkflow:
         base_distance_km = max(
             run_config.target_distance_km, limits.required_distance_km
         )
-        distance_ratio = random.uniform(
-            max(0.0, 1.0 - run_config.distance_jitter_ratio),
-            1.0 + run_config.distance_jitter_ratio,
-        )
+        distance_ratio = random.uniform(1.0, 1.0 + run_config.distance_jitter_ratio)
         target_distance_km = max(
             distance_guard_min_km + 0.02,
             limits.required_distance_km,
@@ -425,17 +392,11 @@ class RunWorkflow:
             limits.max_pace_min_per_km,
         )
 
-        duration_min_sec = min(
-            run_config.target_duration_min_sec,
-            run_config.target_duration_max_sec,
-        )
-        duration_max_sec = max(
-            run_config.target_duration_min_sec,
-            run_config.target_duration_max_sec,
-        )
+        expected_duration_sec = int(target_distance_km * target_pace_min_per_km * 60)
+        delta_sec = max(30, int(expected_duration_sec * 0.15))
         target_duration_sec = random.randint(
-            max(60, duration_min_sec),
-            max(60, duration_max_sec),
+            max(60, expected_duration_sec - delta_sec),
+            max(60, expected_duration_sec + delta_sec),
         )
 
         return RunTargetPlan(
@@ -480,7 +441,7 @@ class RunWorkflow:
     ) -> TrackGenerationRequest:
         run_config = self.settings.run
         route_config = self.settings.route
-        points_config = self.settings.points
+        points_config = self.settings.run
         guard_config = self.settings.guard
         return TrackGenerationRequest(
             start=context.start,
@@ -521,11 +482,11 @@ class RunWorkflow:
         )
 
         for _ in range(3):
-            if (
-                run_config.target_duration_min_sec
-                <= run_data.duration_sec
-                <= run_config.target_duration_max_sec
-            ):
+            actual_pace = run_data.duration_sec / 60.0 / max(run_data.distance_km, 1e-6)
+            deviation = abs(actual_pace - current_plan.target_pace_min_per_km) / max(
+                current_plan.target_pace_min_per_km, 1e-6
+            )
+            if deviation < 0.2:
                 break
 
             corrected_pace = (
@@ -542,10 +503,8 @@ class RunWorkflow:
 
             self._emit(
                 progress,
-                (
-                    "Adjust pace for duration window: "
-                    f"{current_plan.target_pace_min_per_km:.2f} -> {corrected_pace:.2f} min/km"
-                ),
+                f"Adjust pace: "
+                f"{current_plan.target_pace_min_per_km:.2f} -> {corrected_pace:.2f} min/km",
             )
             current_plan = RunTargetPlan(
                 target_distance_km=current_plan.target_distance_km,
@@ -745,12 +704,10 @@ class RunWorkflow:
         record_id: int,
         track: PreparedTrack,
         pass_points: list[dict[str, Any]],
-        compensation_factor: float,
     ) -> dict[str, float | int | str]:
         summary_payload = build_run_summary_payload(
             record_id=record_id,
             run_result=track.run_data,
-            compensation_factor=compensation_factor,
         )
         summary_payload["pass_point"] = self._count_pass_hits(
             points=track.upload_points,
@@ -779,7 +736,6 @@ class RunWorkflow:
         run_type: RunType,
         run_counts: RunCounts,
         track: PreparedTrack,
-        compensation_factor: float,
         run_options: RunExecutionOptions,
         target_skip_reason: str | None,
         summary_payload: dict[str, Any],
@@ -814,7 +770,6 @@ class RunWorkflow:
                 "generated_pace_min_per_km": round(run_data.pace_min_per_km, 4),
                 "generated_pass_point": run_data.must_pass_count,
                 "generated_point_count": len(run_data.points),
-                "generated_compensation_factor": compensation_factor,
                 "generated_distance_guard_min_km": round(
                     track.final_plan.distance_guard_min_km, 4
                 ),
@@ -944,8 +899,7 @@ class RunWorkflow:
                 "  Target already met, but --ignore-target-met is enabled; continue.",
             )
 
-        compensation_factor = self._resolve_compensation_factor()
-        plan = self._build_target_plan(limits, compensation_factor)
+        plan = self._build_target_plan(limits)
         self._emit(
             progress,
             (
@@ -992,7 +946,6 @@ class RunWorkflow:
             record_id=record_id,
             track=track,
             pass_points=pass_points,
-            compensation_factor=compensation_factor,
         )
         encrypted_summary = aes_encrypt(
             json.dumps(summary_payload, ensure_ascii=False),
@@ -1035,7 +988,6 @@ class RunWorkflow:
             run_type=run_type,
             run_counts=run_counts,
             track=track,
-            compensation_factor=compensation_factor,
             run_options=run_options,
             target_skip_reason=target_skip_reason,
             summary_payload=summary_payload,

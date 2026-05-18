@@ -6,9 +6,8 @@ from .models import TrackBuildResult, TrackPoint
 def build_run_summary_payload(
     record_id: int,
     run_result: TrackBuildResult,
-    compensation_factor: float,
 ) -> dict[str, float | int | str]:
-    mileage_m = round(run_result.distance_km * compensation_factor * 1000)
+    mileage_m = round(run_result.distance_km * 1000)
     return {
         "record_id": record_id,
         "pace": run_result.pace_min_per_km or 1,

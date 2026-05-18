@@ -109,12 +109,18 @@ class CredentialSettings(BaseSettings):
         return _validate_aes_key(value)
 
 
-class AccountConfig(BaseModel):
+class _ForbidExtraModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+
+class AccountConfig(_ForbidExtraModel):
     name: str | None = None
     phone: str
     password: str
+    start_lat: float | None = None
+    start_lng: float | None = None
+    target_distance_km: float | None = None
+    target_pace_min_per_km: float | None = None
     skip_wait: bool | None = None
     force_submit: bool | None = None
     ignore_target_met: bool | None = None
@@ -128,9 +134,7 @@ class AccountConfig(BaseModel):
         return text or None
 
 
-class NetworkConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class NetworkConfig(_ForbidExtraModel):
     base_url_xcxapi: str = "https://run.ecust.edu.cn/xcxapi"
     base_url_root: str = "https://run.ecust.edu.cn"
     referer: str = "https://servicewechat.com/wxfa4e6078551d719e/49/page-frame.html"
@@ -147,44 +151,29 @@ class NetworkConfig(BaseModel):
         return value.rstrip("/")
 
 
-class RunConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RunConfig(_ForbidExtraModel):
     start_lat: float = 30.83378
     start_lng: float = 121.504532
     target_distance_km: float = 2.03
     target_pace_min_per_km: float = 6.0
-    target_duration_min_sec: int = 460
-    target_duration_max_sec: int = 490
     sample_interval_sec: int = 1
     must_pass_radius_km: float = 0.05
-    compensation_factor: float = 1.0
-    device_brand: str = ""
     distance_jitter_ratio: float = 0.03
     pace_jitter_ratio: float = 0.08
-
-
-class RouteConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    road_routing_enabled: bool = True
-    road_map_path: str = "map.osm"
-    road_snap_max_m: float = 120.0
-    road_coordinate_bridge_enabled: bool = True
-
-
-class PointsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
     point_accuracy_min: int = 8
     point_accuracy_max: int = 25
     point_jitter_m: float = 2.5
     timestamp_jitter_ms: int = 220
 
 
-class GuardConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class RouteConfig(_ForbidExtraModel):
+    road_routing_enabled: bool = True
+    road_map_path: str = "map.osm"
+    road_snap_max_m: float = 120.0
+    road_coordinate_bridge_enabled: bool = True
 
+
+class GuardConfig(_ForbidExtraModel):
     max_speed_threshold_m_s: float = 10.0
     max_jump_distance_km: float = 0.1
     min_move_distance_m: float = 5.0
@@ -200,9 +189,7 @@ class GuardConfig(BaseModel):
         return min(1.0, max(0.5, float(value)))
 
 
-class OutputConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OutputConfig(_ForbidExtraModel):
     report_path: str | None = None
 
     @field_validator("report_path", mode="before")
@@ -216,9 +203,7 @@ class OutputConfig(BaseModel):
         return str(value)
 
 
-class OptionsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OptionsConfig(_ForbidExtraModel):
     skip_wait: bool = False
     force_submit: bool = False
     ignore_target_met: bool = False
@@ -235,7 +220,6 @@ class FileSettings(BaseSettings):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     route: RouteConfig = Field(default_factory=RouteConfig)
-    points: PointsConfig = Field(default_factory=PointsConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
@@ -256,9 +240,7 @@ class FileSettings(BaseSettings):
         )
 
 
-class Settings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Settings(_ForbidExtraModel):
     account_name: str | None = None
     phone: str
     password: str
@@ -269,7 +251,6 @@ class Settings(BaseModel):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     route: RouteConfig = Field(default_factory=RouteConfig)
-    points: PointsConfig = Field(default_factory=PointsConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
@@ -306,6 +287,27 @@ class Settings(BaseModel):
             raise ConfigError(f"Cannot read config {CONFIG_PATH}: {exc}") from exc
 
     @classmethod
+    def _apply_account_overrides(
+        cls, base_payload: dict[str, Any], account: AccountConfig
+    ) -> dict[str, Any]:
+        """Override global run fields with account-level values if set."""
+        payload = base_payload.copy()
+        run_data = payload["run"].copy() if isinstance(payload["run"], dict) else {}
+        overrides: dict[str, float] = {}
+        if account.start_lat is not None:
+            overrides["start_lat"] = account.start_lat
+        if account.start_lng is not None:
+            overrides["start_lng"] = account.start_lng
+        if account.target_distance_km is not None:
+            overrides["target_distance_km"] = account.target_distance_km
+        if account.target_pace_min_per_km is not None:
+            overrides["target_pace_min_per_km"] = account.target_pace_min_per_km
+        if overrides:
+            run_data.update(overrides)
+            payload["run"] = RunConfig.model_validate(run_data)
+        return payload
+
+    @classmethod
     def load_all(cls) -> list["Settings"]:
         try:
             file_settings = FileSettings()
@@ -335,7 +337,7 @@ class Settings(BaseModel):
                             "FAKE_TRACK_IGNORE_TARGET_MET",
                             global_opts.ignore_target_met,
                         ),
-                        **base_payload,
+                        **cls._apply_account_overrides(base_payload, account),
                     )
                     for account in accounts
                 ]

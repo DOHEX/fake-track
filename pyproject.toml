@@ -17,6 +17,7 @@ dependencies = [
     "typer>=0.25.1",
     "matplotlib>=3.10.9",
     "nicegui>=3.12.0",
+    "tomlkit>=0.15.0",
 ]
 
 [project.scripts]

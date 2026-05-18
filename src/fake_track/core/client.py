@@ -65,9 +65,9 @@ class CampusRunClient:
             if not _session_cache:
                 _session_cache.update(_load_session_cache())
             if key in _session_cache:
-                sid, _ = _session_cache[key]
+                sid, uid = _session_cache[key]
                 self.session_id = sid
-                return ApiResponse(code=1, message="cached", data={}, raw={})
+                return ApiResponse(code=1, message="cached", data={"id": uid}, raw={})
 
         response = self._request(
             _LOGIN,
