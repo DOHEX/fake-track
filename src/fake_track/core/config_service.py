@@ -6,7 +6,6 @@ Validates data through existing pydantic models before writing.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import tomlkit

@@ -15,11 +15,10 @@ from fake_track.core.config_service import (
     update_account,
     update_section,
 )
-from fake_track.core.models import RunType, classify_run_type, semester_for
+from fake_track.core.models import RunType, classify_run_type
 from fake_track.core.utils import (
     annotate_records,
     build_counts_payload,
-    default_track_image_path,
     parse_record_dt,
 )
 from fake_track.core.workflow import RunExecutionOptions, RunWorkflow
@@ -102,27 +101,33 @@ def render_result(container: ui.element, report: dict[str, Any]) -> None:
     success = report.get("success", False)
     color = "emerald" if success else "red"
     label = "OK" if success else "FAILED"
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
 
     with container:
         with ui.card().classes(f"bg-{color}-50 border border-{color}-200"):
             with ui.row().classes("gap-2 items-center"):
                 ui.badge(label, color=color)
-                ui.label("run").classes("text-xs text-slate-500")
                 if report.get("record_id"):
                     ui.label(f"#{report['record_id']}").classes(
                         "text-xs text-slate-400"
                     )
+                if report.get("warning"):
+                    ui.label(report["warning"]).classes("text-xs text-amber-700")
 
-            if report.get("warning"):
-                ui.label(report["warning"]).classes("text-xs text-amber-700 mt-2")
+            with ui.row().classes("gap-x-3 gap-y-0 mt-1 flex-wrap"):
+                dist = summary.get("generated_distance_km", 0)
+                pace = summary.get("generated_pace_min_per_km", 0)
+                dur = summary.get("generated_duration_sec", 0)
+                dur_str = f"{dur // 60}:{dur % 60:02d}"
+                ui.label(f"📏 {dist:.2f}km").classes("text-xs text-slate-600")
+                ui.label(f"⏱ {pace:.1f}min/km").classes("text-xs text-slate-600")
+                ui.label(f"🕐 {dur_str}").classes("text-xs text-slate-600")
+                met = summary.get("target_met", False)
+                tgt = summary.get("target_effective", 0)
+                if tgt:
+                    ui.label(f"{'✅' if met else '❌'} {tgt}").classes("text-xs")
 
-            summary = report.get("summary")
-            if isinstance(summary, dict) and summary:
-                with ui.row().classes("gap-x-4 gap-y-1 mt-2 flex-wrap"):
-                    for key, val in summary.items():
-                        ui.label(f"{key}: {val}").classes("text-xs text-slate-600")
-
-            with ui.expansion("Raw JSON", icon="code").classes("mt-2"):
+            with ui.expansion("Detail", icon="code").classes("mt-1"):
                 ui.code(str(report), language="json")
 
 
@@ -399,6 +404,8 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
             ui.spinner(size="sm")
             ui.label("Loading counts...").classes("text-xs text-slate-400 ml-2")
 
+        _last_counts: dict[str, int] = {}
+
         async def _fetch_counts(
             _settings: Settings = settings,
             _container: ui.element = counts_container,
@@ -413,6 +420,9 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
                 counts = build_counts_payload(student_id, resp.data)
                 today = await run.io_bound(_check_today_status, client)
                 render_counts(counts, _container, _eff, _met, today)
+                _last_counts["morning"] = counts["morning"]
+                _last_counts["normal"] = counts["normal"]
+                _last_counts["effective"] = counts["effective"]
             except Exception as exc:
                 _container.clear()
                 with _container:
@@ -428,10 +438,21 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
             )
             chk_image = ui.checkbox("image", value=False)
 
-        progress_label = ui.label("").classes("text-xs text-slate-500 mt-1")
+        progress_container = ui.column().classes("mt-1 w-full")
+        with progress_container:
+            progress_bar = ui.linear_progress(value=0, size="16px", show_value=False)
+            progress_label = ui.label("").classes("text-xs text-slate-500")
+        progress_container.set_visibility(False)
         result_container = ui.column().classes("mt-1")
 
+        _step_pattern = __import__("re").compile(r"Step (\d+)/(\d+)")
+
         def _on_progress(msg: str) -> None:
+            m = _step_pattern.search(msg)
+            if m:
+                current = int(m.group(1))
+                total = int(m.group(2))
+                progress_bar.set_value(current / total)
             progress_label.set_text(msg)
 
         async def _run(
@@ -439,10 +460,13 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
             _container: ui.element = result_container,
         ) -> None:
             _container.clear()
+            progress_container.set_visibility(True)
+            progress_bar.set_value(0)
             progress_label.set_text("Starting...")
             with _container:
                 ui.spinner(size="sm")
             try:
+                before = dict(_last_counts)
                 workflow = await run.io_bound(RunWorkflow, _settings)
                 stamp = datetime.now().strftime("web-track-%Y%m%d-%H%M%S.png")
                 image_path = (
@@ -461,11 +485,29 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
                     workflow.run_full, progress=_on_progress, options=options
                 )
                 render_result(_container, report.to_dict())
-                progress_label.set_text("")
+                progress_container.set_visibility(False)
                 await _fetch_counts()
+                after = dict(_last_counts)
+                if before and after:
+                    with _container:
+                        parts = []
+                        for key, label in [
+                            ("morning", "晨跑"),
+                            ("normal", "普跑"),
+                            ("effective", "有效"),
+                        ]:
+                            b = before.get(key, 0)
+                            a = after.get(key, 0)
+                            if a != b:
+                                parts.append(f"{label} {b}→{a}")
+                            else:
+                                parts.append(f"{label} {b}")
+                        ui.label(" · ".join(parts)).classes(
+                            "text-xs text-slate-400 mt-1"
+                        )
             except Exception as exc:
                 render_error(_container, str(exc))
-                progress_label.set_text("")
+                progress_container.set_visibility(False)
 
         with ui.row().classes("gap-2 mt-2"):
             ui.button("Refresh", icon="refresh", on_click=_fetch_counts)
