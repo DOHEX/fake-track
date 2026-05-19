@@ -21,6 +21,10 @@ class ApiError(RuntimeError):
     pass
 
 
+class SessionExpiredError(ApiError):
+    """Raised when the server returns code=-2 (session invalid)."""
+
+
 @dataclass(slots=True)
 class ApiResponse:
     code: int
@@ -60,15 +64,6 @@ class CampusRunClient:
         self.session_id = ""
 
     def authenticate_user(self) -> ApiResponse:
-        key = self.settings.phone
-        with _session_lock:
-            if not _session_cache:
-                _session_cache.update(_load_session_cache())
-            if key in _session_cache:
-                sid, uid = _session_cache[key]
-                self.session_id = sid
-                return ApiResponse(code=1, message="cached", data={"id": uid}, raw={})
-
         response = self._request(
             _LOGIN,
             {
@@ -126,7 +121,23 @@ class CampusRunClient:
     ) -> ApiResponse:
         url = self._build_url(endpoint)
         kwargs = self._request_kwargs(endpoint, payload)
+        try:
+            return self._execute_request(endpoint, url, kwargs)
+        except SessionExpiredError:
+            if endpoint == _LOGIN:
+                raise
+            # Auto-reauth: clear stale session, re-login, retry once
+            invalidate_session(self.settings.phone)
+            self.authenticate_user()
+            kwargs["headers"] = self._headers()  # refresh session header
+            return self._execute_request(endpoint, url, kwargs)
 
+    def _execute_request(
+        self,
+        endpoint: _Endpoint,
+        url: str,
+        kwargs: dict[str, Any],
+    ) -> ApiResponse:
         try:
             response = self.session.request(endpoint.method, url, **kwargs)
         except requests.RequestException as exc:
@@ -228,7 +239,7 @@ class CampusRunClient:
         data = body.get("data")
 
         if code == -2:
-            raise ApiError("Session invalid (code=-2)")
+            raise SessionExpiredError("Session invalid (code=-2)")
         if code != 1:
             raise ApiError(message or f"API error code={code} endpoint={endpoint.path}")
         return ApiResponse(code=code, message=message, data=data, raw=body)
@@ -270,23 +281,37 @@ def _extract_student_id(login_data: object) -> int:
     return student_id
 
 
-def get_authenticated_client(settings: Settings) -> tuple[CampusRunClient, int]:
-    key = settings.phone
+def invalidate_session(phone: str) -> None:
+    """Clear cached session for a phone number."""
     with _session_lock:
-        if not _session_cache:
-            _session_cache.update(_load_session_cache())
-        if key in _session_cache:
-            sid, uid = _session_cache[key]
-            client = CampusRunClient(settings)
-            client.session_id = sid
-            return client, uid
+        if phone in _session_cache:
+            del _session_cache[phone]
+            _save_session_cache()
 
+
+def _login_and_cache(settings: Settings) -> tuple[CampusRunClient, int]:
     client = CampusRunClient(settings)
     login = client.authenticate_user()
     sid = client.session_id
     uid = _extract_student_id(login.data)
     if sid and uid:
         with _session_lock:
-            _session_cache[key] = (sid, uid)
+            _session_cache[settings.phone] = (sid, uid)
             _save_session_cache()
     return client, uid
+
+
+def ensure_authenticated_client(settings: Settings) -> tuple[CampusRunClient, int]:
+    key = settings.phone
+    with _session_lock:
+        if not _session_cache:
+            _session_cache.update(_load_session_cache())
+        cached = _session_cache.get(key)
+
+    if cached is not None:
+        sid, uid = cached
+        client = CampusRunClient(settings)
+        client.session_id = sid
+        return client, uid
+
+    return _login_and_cache(settings)

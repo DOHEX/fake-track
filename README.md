@@ -81,11 +81,13 @@ copy fake-track.example.toml fake-track.toml
 
 | Section | 字段 | 说明 |
 |---------|------|------|
-| `[run]` | `start_lat`, `start_lng` | 起点坐标 |
+| `[run]` | `start_lat`, `start_lng` | 起点坐标 (GCJ02) |
 | `[run]` | `target_distance_km`, `target_pace_min_per_km` | 目标距离和配速 |
 | `[route]` | `road_routing_enabled`, `road_map_path` | 路网开关和 OSM 路径 |
 | `[output]` | `report_path` | JSON 报告输出路径 |
 | `[[accounts]]` | `name`, `phone`, `password` | 多账号配置 |
+
+内部计算使用 WGS84, 配置/接口输入输出使用 GCJ02.
 
 详见 [fake-track.example.toml](fake-track.example.toml)。
 

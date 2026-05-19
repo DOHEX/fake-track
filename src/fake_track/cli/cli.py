@@ -5,29 +5,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import NoReturn, TypedDict
 
 import typer
-from rich import box
-from rich.console import Console
-from rich.table import Table
 
-from fake_track.core.client import ApiError, CampusRunClient, get_authenticated_client
+from fake_track.core.client import ApiError, ensure_authenticated_client
 from fake_track.core.config import ConfigError, CryptoSettings, Settings
 from fake_track.core.crypto import aes_encrypt
-from fake_track.core.models import RunType, classify_run_type, semester_for
-from fake_track.core.utils import (
-    annotate_records,
-    build_counts_payload,
-    default_track_image_path,
-    filter_records,
-    mask_phone,
-)
+from fake_track.core.payloads import build_counts_payload
+from fake_track.core.records import annotate_records, filter_records
+from fake_track.core.utils import default_track_image_path, mask_phone
 from fake_track.core.workflow import RunExecutionOptions, RunReport, RunWorkflow
 from fake_track.web import serve as run_web_server
 
+from .output import (
+    _build_multi_report,
+    _error_report,
+    _print_counts,
+    _print_error_report,
+    _print_multi_run_summary,
+    _print_record_list,
+    _print_report,
+    _try_write_error_report,
+    _write_multi_report_file,
+    _write_report_file,
+    console,
+    error_console,
+)
+
 app = typer.Typer(help="fake-track campus run API test tool")
-console = Console()
-error_console = Console(stderr=True)
 
 
 @dataclass(frozen=True)
@@ -155,185 +161,6 @@ def _progress_printer(
     return progress
 
 
-def _print_report(report: RunReport, json_output: bool, title: str) -> None:
-    report_dict = report.to_dict()
-    if json_output:
-        typer.echo(json.dumps(report_dict, ensure_ascii=False, indent=2))
-        return
-
-    if report.mode == "full":
-        _print_full_report(report)
-        return
-    if report.mode == "skipped":
-        _print_skipped_report(report)
-        return
-    if report.mode == "error":
-        _print_error_report(report, title=title)
-        return
-
-    table = _new_summary_table(title)
-    table.add_row("Status", _status_text(report.success))
-    table.add_row("Mode", str(report.mode))
-    table.add_row("Record ID", _display_value(report.record_id))
-    if report.mode == "connectivity":
-        summary = report.summary
-        table.add_row("Student ID", _display_value(summary.get("student_id")))
-        table.add_row("Pass Points", _display_value(summary.get("pass_point_count")))
-    console.print(table)
-    if report.warning:
-        console.print(f"[yellow]warning:[/yellow] {report.warning}")
-
-
-def _new_summary_table(title: str) -> Table:
-    table = Table(title=title, box=box.ASCII)
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="white")
-    return table
-
-
-def _status_text(success: bool) -> str:
-    return "[green]success[/green]" if success else "[red]failed[/red]"
-
-
-def _display_value(value: object, default: str = "-") -> str:
-    if value is None or value == "":
-        return default
-    return str(value)
-
-
-def _format_duration(seconds: object) -> str:
-    if seconds is None:
-        return "-"
-    total = max(0, int(round(float(seconds))))
-    minutes, secs = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
-
-
-def _format_distance_km(value: object) -> str:
-    if value is None:
-        return "-"
-    return f"{float(value):.2f} km"
-
-
-def _format_pace(value: object) -> str:
-    if value is None:
-        return "-"
-    return f"{float(value):.2f} min/km"
-
-
-def _print_full_report(report: RunReport) -> None:
-    summary = report.summary
-    table = _new_summary_table("Run Result")
-    table.add_row("Status", _status_text(report.success))
-    table.add_row("Record ID", _display_value(report.record_id))
-
-    warning_treated_as_success = bool(summary.get("server_warning_treated_as_success"))
-    if report.warning:
-        server_status = (
-            "accepted (warning treated as success)"
-            if warning_treated_as_success
-            else "warning"
-        )
-    else:
-        server_status = "accepted"
-    table.add_row("Server", server_status)
-    if report.warning:
-        table.add_row("Server Warning", report.warning)
-
-    table.add_row(
-        "Distance",
-        _format_distance_km(summary.get("generated_distance_km")),
-    )
-    table.add_row(
-        "Duration",
-        _format_duration(summary.get("generated_duration_sec")),
-    )
-    table.add_row("Pace", _format_pace(summary.get("generated_pace_min_per_km")))
-    table.add_row(
-        "Uploaded",
-        (
-            f"{_display_value(summary.get('uploaded_point_count'), '0')} points / "
-            f"{_display_value(summary.get('uploaded_batches'), '0')} batches"
-        ),
-    )
-
-    if summary.get("generated_track_image"):
-        table.add_row("Track Image", str(summary["generated_track_image"]))
-    if summary.get("generated_ignored_target_skip_reason"):
-        table.add_row(
-            "Target Check",
-            f"ignored: {summary['generated_ignored_target_skip_reason']}",
-        )
-
-    console.print(table)
-
-
-def _print_skipped_report(report: RunReport) -> None:
-    summary = report.summary
-    table = _new_summary_table("Run Result")
-    table.add_row("Status", "[yellow]skipped[/yellow]")
-    table.add_row("Reason", _display_value(summary.get("skip_reason")))
-    table.add_row("Run Type", _display_value(summary.get("run_type")))
-
-    effective = summary.get("effective")
-    target = summary.get("target_effective")
-    if effective is not None or target is not None:
-        table.add_row(
-            "Progress",
-            f"{_display_value(effective, '0')} / {_display_value(target, '0')}",
-        )
-    if summary.get("morning") is not None:
-        table.add_row("Morning", _display_value(summary.get("morning")))
-        table.add_row("Normal", _display_value(summary.get("normal")))
-
-    console.print(table)
-
-
-def _print_error_report(
-    report: RunReport,
-    title: str = "Run Result",
-    output_console: Console | None = None,
-) -> None:
-    table = _new_summary_table(title)
-    table.add_row("Status", _status_text(False))
-    table.add_row("Reason", _display_value(report.warning))
-    (output_console or console).print(table)
-
-
-def _print_counts(counts_payload: dict[str, int | bool], json_output: bool) -> None:
-    if json_output:
-        typer.echo(json.dumps(counts_payload, ensure_ascii=False, indent=2))
-        return
-
-    table = Table(title="Run Counts", box=box.ASCII)
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="white")
-    table.add_row("student_id", str(counts_payload["student_id"]))
-    table.add_row("morning", str(counts_payload["morning"]))
-    table.add_row("normal", str(counts_payload["normal"]))
-    table.add_row("effective", str(counts_payload["effective"]))
-    table.add_row(
-        "completed_target_count", str(counts_payload["completed_target_count"])
-    )
-    table.add_row("target_effective", str(counts_payload["target_effective"]))
-    table.add_row("target_met", str(counts_payload["target_met"]).lower())
-    console.print(table)
-
-
-def _error_report(message: str) -> RunReport:
-    return RunReport(
-        success=False,
-        mode="error",
-        record_id=None,
-        summary={},
-        server={},
-        warning=message,
-    )
-
-
 def _override_output_report_path(
     settings: Settings,
     report_path: str | None,
@@ -359,73 +186,7 @@ def _resolve_track_image_path(
     return str(base)
 
 
-def _build_multi_report(
-    results: list[AccountRunResult],
-) -> dict[str, object]:
-    return {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "success": all(item.report.success for item in results),
-        "mode": "multi",
-        "accounts": [
-            {
-                "index": item.account.index,
-                "name": item.account.settings.account_name,
-                "phone": mask_phone(item.account.settings.phone),
-                "label": item.account.label,
-                "report": item.report.to_dict(),
-            }
-            for item in results
-        ],
-    }
-
-
-def _write_multi_report_file(report: dict[str, object], report_path: Path) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _print_multi_run_summary(results: list[AccountRunResult]) -> None:
-    table = Table(title="Multi Run Summary", box=box.ASCII)
-    table.add_column("Account", style="cyan")
-    table.add_column("Status", style="white")
-    table.add_column("Mode", style="white")
-    table.add_column("Record ID", style="white")
-    table.add_column("Warning", style="yellow")
-
-    for item in results:
-        report = item.report
-        table.add_row(
-            item.account.label,
-            _status_text(report.success),
-            str(report.mode),
-            _display_value(report.record_id),
-            _display_value(report.warning),
-        )
-    console.print(table)
-
-
-def _write_report_file(report: RunReport, report_path: Path) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _try_write_error_report(report_path: Path | None, message: str) -> None:
-    if report_path is None:
-        return
-
-    try:
-        _write_report_file(_error_report(message), report_path)
-    except OSError as exc:
-        error_console.print(f"[yellow]warning:[/yellow] cannot write report: {exc}")
-
-
-def _exit_with_error(command: str, exc: Exception, json_output: bool) -> None:
+def _handle_command_error(command: str, exc: Exception, json_output: bool) -> NoReturn:
     message = str(exc)
     if json_output:
         _print_report(_error_report(message), json_output=True, title="")
@@ -448,7 +209,7 @@ def _load_accounts(
         settings_list = Settings.load_all()
     except ConfigError as exc:
         _try_write_error_report(report_path, str(exc))
-        _exit_with_error(command, exc, json_output)
+        _handle_command_error(command, exc, json_output)
 
     contexts = _build_account_contexts(settings_list)
     return _select_accounts(contexts, selectors)
@@ -569,7 +330,7 @@ def run_once(
             )
             try:
                 report = workflow.run_full(progress=progress, options=run_options)
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+            except Exception as exc:  # pylint: disable=broad-except
                 report = _error_report(str(exc))
             return AccountRunResult(account=context, report=report)
 
@@ -586,7 +347,7 @@ def run_once(
             try:
                 _write_multi_report_file(multi_report, report_path)
             except OSError as exc:
-                _exit_with_error("run", exc, json_output)
+                _handle_command_error("run", exc, json_output)
 
         if json_output:
             typer.echo(json.dumps(multi_report, ensure_ascii=False, indent=2))
@@ -624,29 +385,28 @@ def run_once(
             progress=_progress_printer(enabled=not json_output),
             options=run_options,
         )
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+    except Exception as exc:  # pylint: disable=broad-except
         _try_write_error_report(report_path, str(exc))
-        _exit_with_error("run", exc, json_output)
+        _handle_command_error("run", exc, json_output)
 
     if report_path is not None:
         try:
             _write_report_file(report, report_path)
         except OSError as exc:
-            _exit_with_error("run", exc, json_output)
+            _handle_command_error("run", exc, json_output)
 
     _print_report(report, json_output=json_output, title="Run Summary")
     if not report.success:
         raise typer.Exit(1)
 
 
-_RUN_TYPE_LABELS: dict[RunType | None, str] = {
-    RunType.MORNING: "晨跑",
-    RunType.NORMAL: "普跑",
-    None: "—",
-}
+class _RecordListPayload(TypedDict):
+    list: list[dict[str, object]]
+    page: int
+    total: int
 
 
-def _build_record_list_payload(resp_data: object) -> dict[str, object]:
+def _build_record_list_payload(resp_data: object) -> _RecordListPayload:
     if not isinstance(resp_data, dict):
         raise ApiError(
             f"Record list response data is not a dict: {type(resp_data).__name__}"
@@ -658,67 +418,6 @@ def _build_record_list_payload(resp_data: object) -> dict[str, object]:
         "page": int(resp_data.get("page", 1)),
         "total": int(resp_data.get("total", 0)),
     }
-
-
-def _print_record_list(
-    records: list[dict[str, object]],
-    page: int,
-    total: int,
-    json_output: bool,
-    account_label: str | None = None,
-    filter_tags: str = "",
-) -> None:
-    if json_output:
-        typer.echo(
-            json.dumps(
-                {"records": records, "page": page, "total": total},
-                ensure_ascii=False,
-                indent=2,
-                default=str,
-            )
-        )
-        return
-
-    if not records:
-        console.print("[yellow]No records found.[/yellow]")
-        return
-
-    title = f"Records (page {page})"
-    if filter_tags:
-        title += f"  [{filter_tags}]"
-    if account_label:
-        title += f" -- {account_label}"
-
-    table = Table(title=title, box=box.ASCII)
-    table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Start", style="white")
-    table.add_column("End", style="white")
-    table.add_column("Mileage", style="white", justify="right")
-    table.add_column("Speed", style="white", justify="right")
-    table.add_column("Status", style="white")
-    table.add_column("Type", style="white")
-
-    status_labels = {1: "达标", 2: "无效"}
-
-    for r in records:
-        mileage_m = float(r.get("mileage", 0) or 0)
-        status_code = int(r.get("status", 0))
-        run_type = r.get("_run_type")
-        type_label = _RUN_TYPE_LABELS.get(run_type, "—")  # type: ignore[arg-type]
-
-        table.add_row(
-            str(r.get("id", "")),
-            str(r.get("start_time", "")),
-            str(r.get("end_time", "")),
-            f"{mileage_m / 1000:.2f} km" if mileage_m else "-",
-            str(r.get("speed", "-")),
-            status_labels.get(status_code, str(status_code)),
-            type_label,
-        )
-
-    console.print(table)
-    if total > 0:
-        console.print(f"[dim]Total records: {total}[/dim]")
 
 
 @app.command()
@@ -743,10 +442,10 @@ def counts(
     results: list[dict[str, object]] = []
     for context in accounts:
         try:
-            client, student_id = get_authenticated_client(context.settings)
+            client, student_id = ensure_authenticated_client(context.settings)
             run_counts = client.fetch_run_counts(student_id)
-            counts_payload = build_counts_payload(student_id, run_counts.data)
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+            counts = build_counts_payload(student_id, run_counts.data)
+        except Exception as exc:  # pylint: disable=broad-except
             failed = True
             if json_output:
                 results.append({"account": context.label, "error": str(exc).strip()})
@@ -755,11 +454,25 @@ def counts(
             continue
 
         if json_output:
-            results.append({"account": context.label, "counts": counts_payload})
+            results.append(
+                {
+                    "account": context.label,
+                    "counts": {
+                        "student_id": student_id,
+                        "morning": counts.morning,
+                        "normal": counts.normal,
+                        "effective": counts.effective,
+                        "completed_target_count": counts.effective,
+                        "target_effective": counts.target_effective,
+                        "target_met": counts.target_effective > 0
+                        and counts.effective >= counts.target_effective,
+                    },
+                }
+            )
         else:
             if len(accounts) > 1:
                 console.print(f"Account: {context.label}")
-            _print_counts(counts_payload, json_output=False)
+            _print_counts(counts, json_output=False, student_id=student_id)
 
     if json_output and len(accounts) > 1:
         typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -824,10 +537,10 @@ def recordlist(
 
     for context in accounts:
         try:
-            client, _ = get_authenticated_client(context.settings)
+            client, _ = ensure_authenticated_client(context.settings)
             resp = client.fetch_record_list(page=page, size=size)
             payload = _build_record_list_payload(resp.data)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # pylint: disable=broad-except
             failed = True
             if json_output:
                 results.append({"account": context.label, "error": str(exc).strip()})

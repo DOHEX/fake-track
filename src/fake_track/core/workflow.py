@@ -2,10 +2,9 @@ import json
 import random
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import batched
-from pathlib import Path
 from typing import Any
 
 from rich.progress import (
@@ -21,38 +20,33 @@ from .config import Settings
 from .crypto import aes_encrypt, encryption_self_check
 from .geo import gcj02_to_wgs84, haversine_km, wgs84_to_gcj02
 from .models import (
+    GeneratedTrack,
+    PassPoint,
     RunCounts,
     RunType,
-    TrackBuildResult,
     TrackFilterPolicy,
-    TrackGenerationRequest,
     TrackPoint,
+    TrackRequest,
     classify_run_type,
 )
-from .payloads import build_path_upload_payload, build_run_summary_payload
+from .payloads import (
+    build_counts_payload,
+    build_path_upload_payload,
+    build_run_summary_payload,
+    dicts_to_pass_points,
+)
+from .report import (
+    RunReport,
+    _make_skip_summary,
+    _RunResponses,
+    build_full_report,
+    write_report_file,
+)
 from .track_generator import TrackGenerator
 from .visualize import render_track_overlay_png
 
 ProgressCallback = Callable[[str], None]
 UPLOAD_BATCH_SIZE = 50
-SUCCESS_RECORD_WARNINGS = frozenset(
-    {
-        "恭喜您成绩达标",
-    }
-)
-
-
-@dataclass(slots=True)
-class RunReport:
-    success: bool
-    mode: str
-    record_id: int | None
-    summary: dict[str, Any]
-    server: dict[str, Any]
-    warning: str | None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -65,14 +59,14 @@ class RunExecutionOptions:
 
 
 @dataclass(slots=True, frozen=True)
-class ServerRunLimits:
+class RunLimits:
     required_distance_km: float
     min_pace_min_per_km: float
     max_pace_min_per_km: float
 
 
 @dataclass(slots=True, frozen=True)
-class RunTargetPlan:
+class TargetPlan:
     target_distance_km: float
     target_pace_min_per_km: float
     target_duration_sec: int
@@ -80,43 +74,32 @@ class RunTargetPlan:
 
 
 @dataclass(slots=True, frozen=True)
-class TrackGenerationContext:
+class TrackContext:
     start: tuple[float, float]
-    pass_points: list[dict[str, Any]]
-    coordinate_bridge_applied: bool
+    pass_points: list[PassPoint]
 
 
 @dataclass(slots=True)
-class PreparedTrack:
-    run_data: TrackBuildResult
+class SubmissionTrack:
+    run_data: GeneratedTrack
     upload_points: list[TrackPoint]
-    final_plan: RunTargetPlan
+    final_plan: TargetPlan
     distance_guard_attempts: int
     quality_guard_attempts: int
-    coordinate_bridge_applied: bool
     track_image: str | None
-
-
-@dataclass(slots=True)
-class FullRunResponses:
-    login: ApiResponse
-    rand_info: ApiResponse
-    line: ApiResponse
-    check: ApiResponse
-    update: ApiResponse
-    record: ApiResponse
-    path_info: ApiResponse
 
 
 class RunWorkflow:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = CampusRunClient(settings)
-        self.track_generator = TrackGenerator()
+        self.track_generator = TrackGenerator(
+            road_map_path=settings.route.road_map_path,
+        )
 
     @staticmethod
     def _format_seconds(seconds: float) -> str:
-        total = max(0, int(round(seconds)))
+        total = max(0, round(seconds))
         hours, rem = divmod(total, 3600)
         minutes, secs = divmod(rem, 60)
         if hours > 0:
@@ -171,23 +154,14 @@ class RunWorkflow:
         run_type: RunType | None = None,
         server_responses: dict[str, Any] | None = None,
     ) -> RunReport:
+        from .models import ServerResponses
+
         report = RunReport(
             success=True,
             mode="skipped",
             record_id=None,
-            summary={
-                "run_type": run_type.value if run_type else None,
-                "morning": run_counts.morning if run_counts else None,
-                "normal": run_counts.normal if run_counts else None,
-                "effective": run_counts.effective if run_counts else None,
-                "target_effective": (
-                    run_counts.target_effective if run_counts else None
-                ),
-                "skip_reason": skip_reason,
-            },
-            server={
-                **(server_responses or {}),
-            },
+            summary=_make_skip_summary(run_type, run_counts, skip_reason),
+            server=ServerResponses(**(server_responses or {})),
             warning=skip_reason,
         )
         self._write_report(report)
@@ -200,23 +174,10 @@ class RunWorkflow:
 
     @staticmethod
     def _convert_pass_points(
-        pass_points: list[dict[str, Any]],
+        pass_points: list[PassPoint],
         converter: Callable[[float, float], tuple[float, float]],
-    ) -> list[dict[str, Any]]:
-        converted: list[dict[str, Any]] = []
-        for item in pass_points:
-            cloned = dict(item)
-            try:
-                lat = float(item["lat"])
-                lng = float(item["lng"])
-            except KeyError, TypeError, ValueError:
-                converted.append(cloned)
-                continue
-            out_lat, out_lng = converter(lat, lng)
-            cloned["lat"] = out_lat
-            cloned["lng"] = out_lng
-            converted.append(cloned)
-        return converted
+    ) -> list[PassPoint]:
+        return [PassPoint(*converter(p.lat, p.lng)) for p in pass_points]
 
     @staticmethod
     def _convert_track_points(
@@ -239,18 +200,14 @@ class RunWorkflow:
     @staticmethod
     def _count_pass_hits(
         points: list[TrackPoint],
-        must_pass_points: list[dict[str, Any]],
+        must_pass_points: list[PassPoint],
         radius_km: float,
     ) -> int:
         hits = 0
-        for item in must_pass_points:
-            try:
-                p_lat = float(item["lat"])
-                p_lng = float(item["lng"])
-            except KeyError, TypeError, ValueError:
-                continue
+        for pp in must_pass_points:
             if any(
-                haversine_km(point.latitude, point.longitude, p_lat, p_lng) <= radius_km
+                haversine_km(point.latitude, point.longitude, pp.lat, pp.lng)
+                <= radius_km
                 for point in points
             ):
                 hits += 1
@@ -279,7 +236,7 @@ class RunWorkflow:
 
     def _track_quality_issue(
         self,
-        run_data: TrackBuildResult,
+        run_data: GeneratedTrack,
         expected_pass_count: int,
     ) -> str | None:
         if run_data.must_pass_count < expected_pass_count:
@@ -313,7 +270,7 @@ class RunWorkflow:
 
     def _extract_server_limits(
         self, login_data: dict[str, Any]
-    ) -> tuple[int, ServerRunLimits]:
+    ) -> tuple[int, RunLimits]:
         student_id = int(login_data.get("id", 0))
         if not student_id:
             raise ApiError("Login response missing student id")
@@ -322,7 +279,7 @@ class RunWorkflow:
         min_pace_sec = float(login_data.get("min_pace", 180) or 180)
         max_pace_sec = float(login_data.get("max_pace", 1000) or 1000)
 
-        return student_id, ServerRunLimits(
+        return student_id, RunLimits(
             required_distance_km=max(2.0, shortest_distance_m / 1000.0),
             min_pace_min_per_km=min_pace_sec / 60.0,
             max_pace_min_per_km=max_pace_sec / 60.0,
@@ -334,18 +291,7 @@ class RunWorkflow:
         progress: ProgressCallback | None,
     ) -> tuple[RunCounts, ApiResponse]:
         run_counts_resp = self.client.fetch_run_counts(student_id)
-        rd = run_counts_resp.data
-        if not isinstance(rd, dict):
-            raise ApiError(
-                f"Run counts response data is not a dict: {type(rd).__name__}"
-            )
-
-        run_counts = RunCounts(
-            morning=int(rd.get("morning", 0)),
-            normal=int(rd.get("universal", 0)),
-            effective=int(rd.get("effective", 0)),
-            target_effective=int(rd.get("target_effective", 0)),
-        )
+        run_counts = build_counts_payload(student_id, run_counts_resp.data)
         self._emit(
             progress,
             f"  Run counts: morning={run_counts.morning}, "
@@ -355,10 +301,10 @@ class RunWorkflow:
         )
         return run_counts, run_counts_resp
 
-    def _build_target_plan(
+    def _plan_target(
         self,
-        limits: ServerRunLimits,
-    ) -> RunTargetPlan:
+        limits: RunLimits,
+    ) -> TargetPlan:
         run_config = self.settings.run
         guard_config = self.settings.guard
         hard_distance_floor_km = max(2.0, limits.required_distance_km)
@@ -399,7 +345,7 @@ class RunWorkflow:
             max(60, expected_duration_sec + delta_sec),
         )
 
-        return RunTargetPlan(
+        return TargetPlan(
             target_distance_km=target_distance_km,
             target_pace_min_per_km=target_pace_min_per_km,
             target_duration_sec=target_duration_sec,
@@ -410,40 +356,31 @@ class RunWorkflow:
         self,
         pass_points: list[dict[str, Any]],
         progress: ProgressCallback | None,
-    ) -> TrackGenerationContext:
+    ) -> TrackContext:
         run_config = self.settings.run
-        route_config = self.settings.route
-        start = (run_config.start_lat, run_config.start_lng)
-        converted_pass_points = pass_points
-        bridge_applied = False
+        start = gcj02_to_wgs84(run_config.start_lat, run_config.start_lng)
+        gcj_pass_points = dicts_to_pass_points(pass_points)
+        wgs_pass_points = self._convert_pass_points(gcj_pass_points, gcj02_to_wgs84)
+        self._emit(
+            progress,
+            "Coordinate bridge: gcj02 -> wgs84 for internal processing",
+        )
 
-        if (
-            route_config.road_routing_enabled
-            and route_config.road_coordinate_bridge_enabled
-        ):
-            start = gcj02_to_wgs84(start[0], start[1])
-            converted_pass_points = self._convert_pass_points(
-                pass_points, gcj02_to_wgs84
-            )
-            bridge_applied = True
-            self._emit(progress, "Coordinate bridge: gcj02 -> wgs84 for road routing")
-
-        return TrackGenerationContext(
+        return TrackContext(
             start=start,
-            pass_points=converted_pass_points,
-            coordinate_bridge_applied=bridge_applied,
+            pass_points=wgs_pass_points,
         )
 
     def _build_generation_request(
         self,
-        context: TrackGenerationContext,
-        plan: RunTargetPlan,
-    ) -> TrackGenerationRequest:
+        context: TrackContext,
+        plan: TargetPlan,
+    ) -> TrackRequest:
         run_config = self.settings.run
         route_config = self.settings.route
         points_config = self.settings.run
         guard_config = self.settings.guard
-        return TrackGenerationRequest(
+        return TrackRequest(
             start=context.start,
             must_pass_points=context.pass_points,
             target_distance_km=plan.target_distance_km,
@@ -468,14 +405,13 @@ class RunWorkflow:
             ),
         )
 
-    def _generate_track_with_guards(
+    def _generate_with_guards(
         self,
-        context: TrackGenerationContext,
-        limits: ServerRunLimits,
-        plan: RunTargetPlan,
+        context: TrackContext,
+        limits: RunLimits,
+        plan: TargetPlan,
         progress: ProgressCallback | None,
-    ) -> tuple[TrackBuildResult, int, int, RunTargetPlan]:
-        run_config = self.settings.run
+    ) -> tuple[GeneratedTrack, int, int, TargetPlan]:
         current_plan = plan
         run_data = self.track_generator.generate(
             self._build_generation_request(context, current_plan)
@@ -506,7 +442,7 @@ class RunWorkflow:
                 f"Adjust pace: "
                 f"{current_plan.target_pace_min_per_km:.2f} -> {corrected_pace:.2f} min/km",
             )
-            current_plan = RunTargetPlan(
+            current_plan = TargetPlan(
                 target_distance_km=current_plan.target_distance_km,
                 target_pace_min_per_km=corrected_pace,
                 target_duration_sec=current_plan.target_duration_sec,
@@ -544,7 +480,7 @@ class RunWorkflow:
                 ),
             )
 
-            current_plan = RunTargetPlan(
+            current_plan = TargetPlan(
                 target_distance_km=next_target_distance,
                 target_pace_min_per_km=current_plan.target_pace_min_per_km,
                 target_duration_sec=current_plan.target_duration_sec,
@@ -574,7 +510,7 @@ class RunWorkflow:
                     f"{quality_issue}; rebuild target {next_target_distance:.2f}km"
                 ),
             )
-            current_plan = RunTargetPlan(
+            current_plan = TargetPlan(
                 target_distance_km=next_target_distance,
                 target_pace_min_per_km=current_plan.target_pace_min_per_km,
                 target_duration_sec=current_plan.target_duration_sec,
@@ -599,16 +535,16 @@ class RunWorkflow:
 
         return run_data, distance_guard_attempts, quality_guard_attempts, current_plan
 
-    def _prepare_track_for_submission(
+    def _finalize_for_submission(
         self,
-        context: TrackGenerationContext,
-        limits: ServerRunLimits,
-        plan: RunTargetPlan,
+        context: TrackContext,
+        limits: RunLimits,
+        plan: TargetPlan,
         track_image_path: str | None,
         progress: ProgressCallback | None,
-    ) -> PreparedTrack:
+    ) -> SubmissionTrack:
         run_data, distance_guard_attempts, quality_guard_attempts, final_plan = (
-            self._generate_track_with_guards(
+            self._generate_with_guards(
                 context=context,
                 limits=limits,
                 plan=plan,
@@ -634,10 +570,8 @@ class RunWorkflow:
             ),
         )
 
-        upload_points = run_data.points
-        if context.coordinate_bridge_applied:
-            upload_points = self._convert_track_points(run_data.points, wgs84_to_gcj02)
-            self._emit(progress, "Coordinate bridge: wgs84 -> gcj02 for upload")
+        upload_points = self._convert_track_points(run_data.points, wgs84_to_gcj02)
+        self._emit(progress, "Coordinate bridge: wgs84 -> gcj02 for API upload")
 
         track_image = self._render_track_image(
             track_image_path=track_image_path,
@@ -646,21 +580,20 @@ class RunWorkflow:
             progress=progress,
         )
 
-        return PreparedTrack(
+        return SubmissionTrack(
             run_data=run_data,
             upload_points=upload_points,
             final_plan=final_plan,
             distance_guard_attempts=distance_guard_attempts,
             quality_guard_attempts=quality_guard_attempts,
-            coordinate_bridge_applied=context.coordinate_bridge_applied,
             track_image=track_image,
         )
 
     def _render_track_image(
         self,
         track_image_path: str | None,
-        run_data: TrackBuildResult,
-        context: TrackGenerationContext,
+        run_data: GeneratedTrack,
+        context: TrackContext,
         progress: ProgressCallback | None,
     ) -> str | None:
         if not track_image_path:
@@ -675,7 +608,7 @@ class RunWorkflow:
             )
             self._emit(progress, f"Track image saved: {track_image}")
             return track_image
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-except
+        except Exception as exc:  # pylint: disable=broad-except
             self._emit(progress, f"Track image skipped: {exc}")
         return None
 
@@ -702,8 +635,8 @@ class RunWorkflow:
     def _build_summary_payload(
         self,
         record_id: int,
-        track: PreparedTrack,
-        pass_points: list[dict[str, Any]],
+        track: SubmissionTrack,
+        pass_points: list[PassPoint],
     ) -> dict[str, float | int | str]:
         summary_payload = build_run_summary_payload(
             record_id=record_id,
@@ -716,94 +649,33 @@ class RunWorkflow:
         )
         return summary_payload
 
-    @staticmethod
-    def _extract_record_warning(record: ApiResponse) -> str | None:
-        if isinstance(record.data, dict):
-            warning = record.data.get("warning")
-        else:
-            warning = (
-                f"recordInfo response data is not a dict: {type(record.data).__name__}"
-            )
-        return str(warning).strip() if warning else None
-
-    @staticmethod
-    def _is_success_record_warning(warning: str | None) -> bool:
-        return warning in SUCCESS_RECORD_WARNINGS
-
     def _build_full_report(
         self,
         record_id: int,
         run_type: RunType,
         run_counts: RunCounts,
-        track: PreparedTrack,
+        track: SubmissionTrack,
         run_options: RunExecutionOptions,
         target_skip_reason: str | None,
         summary_payload: dict[str, Any],
         uploaded_batches: int,
-        responses: FullRunResponses,
+        responses: _RunResponses,
     ) -> RunReport:
-        run_data = track.run_data
-        warning_text = self._extract_record_warning(responses.record)
-        is_success_warning = self._is_success_record_warning(warning_text)
-
-        return RunReport(
-            success=warning_text is None or is_success_warning,
-            mode="full",
+        return build_full_report(
             record_id=record_id,
-            summary={
-                "run_type": run_type.value,
-                "morning": run_counts.morning,
-                "normal": run_counts.normal,
-                "effective": run_counts.effective,
-                "target_effective": run_counts.target_effective,
-                "target_met": (
-                    run_counts.target_effective > 0
-                    and run_counts.effective >= run_counts.target_effective
-                ),
-                "generated_distance_km": round(run_data.distance_km, 4),
-                "generated_distance_raw_km": round(run_data.raw_distance_km, 4),
-                "generated_distance_confirmed_km": round(
-                    run_data.confirmed_distance_km, 4
-                ),
-                "generated_confirmed_point_count": run_data.confirmed_point_count,
-                "generated_duration_sec": run_data.duration_sec,
-                "generated_pace_min_per_km": round(run_data.pace_min_per_km, 4),
-                "generated_pass_point": run_data.must_pass_count,
-                "generated_point_count": len(run_data.points),
-                "generated_distance_guard_min_km": round(
-                    track.final_plan.distance_guard_min_km, 4
-                ),
-                "generated_distance_guard_attempts": track.distance_guard_attempts,
-                "generated_quality_guard_attempts": track.quality_guard_attempts,
-                "generated_road_routing_used": run_data.road_routing_used,
-                "generated_coordinate_bridge_applied": (
-                    track.coordinate_bridge_applied
-                ),
-                "generated_track_image_enabled": (
-                    run_options.track_image_path is not None
-                ),
-                "generated_submit_wait_skipped": run_options.skip_submit_wait,
-                "generated_force_submit": run_options.force_submit,
-                "generated_ignore_target_met": run_options.ignore_target_met,
-                "generated_ignored_target_skip_reason": target_skip_reason,
-                "generated_track_image": track.track_image,
-                "uploaded_batches": uploaded_batches,
-                "uploaded_point_count": len(track.upload_points),
-                "target_duration_sec": track.final_plan.target_duration_sec,
-                "server_warning_detected": warning_text is not None,
-                "server_warning_treated_as_success": is_success_warning,
-                "record_payload": summary_payload,
-            },
-            server={
-                "login": responses.login.raw,
-                "randrunInfo": responses.rand_info.raw,
-                "createLine": responses.line.raw,
-                "checkRecord": responses.check.raw,
-                "updateRecordNew": responses.update.raw,
-                "recordInfo": responses.record.raw,
-                "GetPathPoints": responses.path_info.raw,
-            },
-            warning=warning_text,
+            run_type=run_type,
+            run_counts=run_counts,
+            run_data=track.run_data,
+            final_plan=track.final_plan,
+            run_options=run_options,
+            target_skip_reason=target_skip_reason,
+            summary_payload=summary_payload,
+            uploaded_batches=uploaded_batches,
+            upload_point_count=len(track.upload_points),
+            track_image=track.track_image,
+            distance_guard_attempts=track.distance_guard_attempts,
+            quality_guard_attempts=track.quality_guard_attempts,
+            responses=responses,
         )
 
     def _wait_before_submit(
@@ -899,7 +771,7 @@ class RunWorkflow:
                 "  Target already met, but --ignore-target-met is enabled; continue.",
             )
 
-        plan = self._build_target_plan(limits)
+        plan = self._plan_target(limits)
         self._emit(
             progress,
             (
@@ -920,7 +792,7 @@ class RunWorkflow:
         context = self._prepare_track_context(pass_points, progress)
 
         self._emit(progress, "Step 5/9: generate track")
-        track = self._prepare_track_for_submission(
+        track = self._finalize_for_submission(
             context=context,
             limits=limits,
             plan=plan,
@@ -942,10 +814,11 @@ class RunWorkflow:
             progress=progress,
         )
 
+        gcj_pass_points = dicts_to_pass_points(pass_points)
         summary_payload = self._build_summary_payload(
             record_id=record_id,
             track=track,
-            pass_points=pass_points,
+            pass_points=gcj_pass_points,
         )
         encrypted_summary = aes_encrypt(
             json.dumps(summary_payload, ensure_ascii=False),
@@ -992,7 +865,7 @@ class RunWorkflow:
             target_skip_reason=target_skip_reason,
             summary_payload=summary_payload,
             uploaded_batches=uploaded_batches,
-            responses=FullRunResponses(
+            responses=_RunResponses(
                 login=login,
                 rand_info=rand_info,
                 line=line,
@@ -1021,7 +894,7 @@ class RunWorkflow:
         uploaded = 0
 
         if progress is None or disable_progress:
-            for segment in batched(points, UPLOAD_BATCH_SIZE):
+            for segment in batched(points, UPLOAD_BATCH_SIZE, strict=False):
                 self._upload_batch(record_id, segment)
                 uploaded += 1
             return uploaded
@@ -1035,7 +908,7 @@ class RunWorkflow:
             transient=True,
         ) as progress_bar:
             task_id = progress_bar.add_task("Uploading", total=total_batches)
-            for segment in batched(points, UPLOAD_BATCH_SIZE):
+            for segment in batched(points, UPLOAD_BATCH_SIZE, strict=False):
                 self._upload_batch(record_id, segment)
                 uploaded += 1
                 progress_bar.update(task_id, advance=1)
@@ -1055,15 +928,4 @@ class RunWorkflow:
         self.client.upload_path_batch(encrypted)
 
     def _write_report(self, report: RunReport) -> None:
-        if not self.settings.output.report_path:
-            return
-
-        path = Path(self.settings.output.report_path)
-        payload = {
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "report": report.to_dict(),
-        }
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_report_file(report, self.settings.output.report_path)

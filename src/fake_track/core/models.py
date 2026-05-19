@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 
 @dataclass(slots=True)
@@ -12,8 +11,14 @@ class TrackPoint:
     accuracy: int
 
 
+@dataclass(slots=True, frozen=True)
+class PassPoint:
+    lat: float
+    lng: float
+
+
 @dataclass(slots=True)
-class TrackBuildResult:
+class GeneratedTrack:
     points: list[TrackPoint]
     distance_km: float
     raw_distance_km: float
@@ -63,9 +68,9 @@ class TrackFilterPolicy:
 
 
 @dataclass(slots=True, frozen=True)
-class TrackGenerationRequest:
+class TrackRequest:
     start: tuple[float, float]
-    must_pass_points: list[dict[str, Any]]
+    must_pass_points: list[PassPoint]
     target_distance_km: float
     target_pace_min_per_km: float
     sample_interval_sec: int
@@ -89,20 +94,52 @@ class RunCounts:
     target_effective: int
 
 
-@dataclass(slots=True)
-class RecordItem:
-    id: int
-    running_time: int
-    status: int
-    mileage: float
-    speed: str
-    kcal: str
-    step_frequency: int
-    motto: str
-    path_image: str
-    start_time: str
-    end_time: str
-    pub_time: str
+@dataclass(slots=True, frozen=True)
+class RunSummary:
+    run_type: str | None = None
+    morning: int | None = None
+    normal: int | None = None
+    effective: int | None = None
+    target_effective: int | None = None
+    target_met: bool | None = None
+    generated_distance_km: float | None = None
+    generated_distance_raw_km: float | None = None
+    generated_distance_confirmed_km: float | None = None
+    generated_confirmed_point_count: int | None = None
+    generated_duration_sec: int | None = None
+    generated_pace_min_per_km: float | None = None
+    generated_pass_point: int | None = None
+    generated_point_count: int | None = None
+    generated_distance_guard_min_km: float | None = None
+    generated_distance_guard_attempts: int | None = None
+    generated_quality_guard_attempts: int | None = None
+    generated_road_routing_used: bool | None = None
+    generated_track_image_enabled: bool | None = None
+    generated_submit_wait_skipped: bool | None = None
+    generated_force_submit: bool | None = None
+    generated_ignore_target_met: bool | None = None
+    generated_ignored_target_skip_reason: str | None = None
+    generated_track_image: str | None = None
+    skip_reason: str | None = None
+    uploaded_batches: int | None = None
+    uploaded_point_count: int | None = None
+    target_duration_sec: int | None = None
+    server_warning_detected: bool | None = None
+    server_warning_treated_as_success: bool | None = None
+    record_payload: dict | None = None
+    pass_point_count: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ServerResponses:
+    login: dict | None = None
+    randrunInfo: dict | None = None
+    createLine: dict | None = None
+    checkRecord: dict | None = None
+    updateRecordNew: dict | None = None
+    recordInfo: dict | None = None
+    GetPathPoints: dict | None = None
+    run_counts: dict | None = None
 
 
 def format_timestamp_ms(timestamp_ms: int) -> str:

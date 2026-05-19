@@ -7,7 +7,7 @@ import osmnx as ox
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from .models import TrackPoint
+from .models import PassPoint, TrackPoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +51,7 @@ def render_track_overlay_png(
     map_path: str,
     points: list[TrackPoint],
     output_path: str,
-    must_pass_points: list[dict] | None = None,
+    must_pass_points: list[PassPoint] | None = None,
 ) -> str:
     if len(points) < 2:
         raise ValueError("Not enough points to render track overlay")
@@ -62,7 +62,7 @@ def render_track_overlay_png(
 
     try:
         graph = ox.graph_from_xml(str(osm_file), simplify=False, retain_all=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise ValueError(f"No highway geometry found in map: {map_path}") from exc
 
     if graph.number_of_nodes() == 0 or graph.number_of_edges() == 0:
@@ -90,14 +90,8 @@ def render_track_overlay_png(
     ax.plot(track_lons, track_lats, color="#DE3036", linewidth=2.8, zorder=4)
 
     if must_pass_points:
-        pass_lats: list[float] = []
-        pass_lons: list[float] = []
-        for item in must_pass_points:
-            try:
-                pass_lats.append(float(item["lat"]))
-                pass_lons.append(float(item["lng"]))
-            except KeyError, TypeError, ValueError:
-                continue
+        pass_lats = [p.lat for p in must_pass_points]
+        pass_lons = [p.lng for p in must_pass_points]
         if pass_lats and pass_lons:
             ax.scatter(
                 pass_lons,

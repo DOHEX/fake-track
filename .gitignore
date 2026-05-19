@@ -20,3 +20,5 @@ dev
 
 AGENTS.md
 fake-track.toml
+.claude/
+.vscode/

@@ -1,6 +1,8 @@
 import os
+import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from pydantic import (
     AliasChoices,
@@ -31,7 +33,7 @@ def _validate_aes_key(value: str) -> str:
     return value
 
 
-def _format_validation_error(exc: ValidationError) -> str:
+def format_validation_error(exc: ValidationError) -> str:
     details: list[str] = []
     for item in exc.errors():
         location = ".".join(str(part) for part in item.get("loc", ()))
@@ -79,12 +81,12 @@ class CryptoSettings(BaseSettings):
         return _validate_aes_key(value)
 
     @classmethod
-    def from_env(cls) -> "CryptoSettings":
+    def from_env(cls) -> CryptoSettings:
         try:
-            return cls()
+            return cls()  # type: ignore[call-arg]
         except ValidationError as exc:
             raise ConfigError(
-                "Invalid environment configuration:\n- " + _format_validation_error(exc)
+                "Invalid environment configuration:\n- " + format_validation_error(exc)
             ) from exc
 
 
@@ -124,6 +126,31 @@ class AccountConfig(_ForbidExtraModel):
     skip_wait: bool | None = None
     force_submit: bool | None = None
     ignore_target_met: bool | None = None
+    auto_run_enabled: bool = False
+    morning_time: str = "06:30"
+    normal_time: str = "12:00"
+    auto_run_jitter_minutes: int = 5
+
+    @field_validator("morning_time")
+    @classmethod
+    def _validate_morning_time(cls, value: str) -> str:
+        if not re.match(r"^06:[0-5]\d$", value):
+            raise ValueError(f"Invalid morning_time: {value!r} (expected 06:00-06:59)")
+        return value
+
+    @field_validator("normal_time")
+    @classmethod
+    def _validate_normal_time(cls, value: str) -> str:
+        if not re.match(r"^(?:0[7-9]|1\d|2[0-1]):[0-5]\d$", value):
+            raise ValueError(f"Invalid normal_time: {value!r} (expected 07:00-21:59)")
+        return value
+
+    @field_validator("auto_run_jitter_minutes")
+    @classmethod
+    def _validate_jitter(cls, value: int) -> int:
+        if value < 0 or value > 60:
+            raise ValueError(f"auto_run_jitter_minutes must be 0-60 (got {value})")
+        return value
 
     @field_validator("name", mode="before")
     @classmethod
@@ -170,7 +197,6 @@ class RouteConfig(_ForbidExtraModel):
     road_routing_enabled: bool = True
     road_map_path: str = "map.osm"
     road_snap_max_m: float = 120.0
-    road_coordinate_bridge_enabled: bool = True
 
 
 class GuardConfig(_ForbidExtraModel):
@@ -260,9 +286,9 @@ class Settings(_ForbidExtraModel):
         return _validate_aes_key(value)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         try:
-            credentials = CredentialSettings()
+            credentials = CredentialSettings()  # type: ignore[call-arg]
             file_settings = FileSettings()
             options = file_settings.options
             return cls(
@@ -279,7 +305,7 @@ class Settings(_ForbidExtraModel):
             )
         except ValidationError as exc:
             raise ConfigError(
-                "Invalid configuration:\n- " + _format_validation_error(exc)
+                "Invalid configuration:\n- " + format_validation_error(exc)
             ) from exc
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"Invalid TOML config {CONFIG_PATH}: {exc}") from exc
@@ -308,7 +334,7 @@ class Settings(_ForbidExtraModel):
         return payload
 
     @classmethod
-    def load_all(cls) -> list["Settings"]:
+    def load_all(cls) -> list[Settings]:
         try:
             file_settings = FileSettings()
             base_payload = file_settings.model_dump(exclude={"accounts", "options"})
@@ -342,7 +368,7 @@ class Settings(_ForbidExtraModel):
                     for account in accounts
                 ]
 
-            credentials = CredentialSettings()
+            credentials = CredentialSettings()  # type: ignore[call-arg]
             return [
                 cls(
                     account_name=None,
@@ -361,7 +387,7 @@ class Settings(_ForbidExtraModel):
             ]
         except ValidationError as exc:
             raise ConfigError(
-                "Invalid configuration:\n- " + _format_validation_error(exc)
+                "Invalid configuration:\n- " + format_validation_error(exc)
             ) from exc
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"Invalid TOML config {CONFIG_PATH}: {exc}") from exc

@@ -6,9 +6,11 @@ Validates data through existing pydantic models before writing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import tomlkit
+from pydantic import ValidationError
 from tomlkit.items import AoT
 
 from fake_track.core.config import (
@@ -20,7 +22,27 @@ from fake_track.core.config import (
     RunConfig,
     Settings,
 )
-from fake_track.core.config import _format_validation_error as _fmt_err
+from fake_track.core.config import format_validation_error as _fmt_err
+
+
+@dataclass(slots=True, frozen=True)
+class AccountInfo:
+    index: int
+    name: str
+    phone: str
+    password: str
+    start_lat: float | None = None
+    start_lng: float | None = None
+    target_distance_km: float | None = None
+    target_pace_min_per_km: float | None = None
+    skip_wait: bool | None = None
+    force_submit: bool | None = None
+    ignore_target_met: bool | None = None
+    auto_run_enabled: bool = False
+    morning_time: str = "06:30"
+    normal_time: str = "12:00"
+    auto_run_jitter_minutes: int = 5
+
 
 _SECTION_MODELS: dict[str, type] = {
     "network": NetworkConfig,
@@ -28,6 +50,15 @@ _SECTION_MODELS: dict[str, type] = {
     "route": RouteConfig,
     "guard": GuardConfig,
 }
+
+
+def _native(value: Any) -> Any:
+    """Convert tomlkit types to native Python for JSON serialization."""
+    if value is None:
+        return None
+    if hasattr(value, "unwrap"):
+        return value.unwrap()
+    return value
 
 
 def _ensure_aot_entry_separation(aot: AoT) -> None:
@@ -75,7 +106,7 @@ def _write_document(doc: tomlkit.TOMLDocument) -> str | None:
         return f"Cannot write {CONFIG_PATH}: {exc}"
 
 
-def list_accounts() -> list[dict[str, Any]]:
+def list_accounts() -> list[AccountInfo]:
     """Return a lightweight list of accounts with an index field."""
     doc, _err = _read_document()
     if doc is None:
@@ -83,22 +114,28 @@ def list_accounts() -> list[dict[str, Any]]:
     accounts_aot = doc.get("accounts")
     if not isinstance(accounts_aot, AoT):
         return []
-    result: list[dict[str, Any]] = []
+    result: list[AccountInfo] = []
     for i, item in enumerate(accounts_aot):
         result.append(
-            {
-                "index": i,
-                "name": item.get("name", ""),
-                "phone": item.get("phone", ""),
-                "password": item.get("password", ""),
-                "start_lat": item.get("start_lat"),
-                "start_lng": item.get("start_lng"),
-                "target_distance_km": item.get("target_distance_km"),
-                "target_pace_min_per_km": item.get("target_pace_min_per_km"),
-                "skip_wait": item.get("skip_wait"),
-                "force_submit": item.get("force_submit"),
-                "ignore_target_met": item.get("ignore_target_met"),
-            }
+            AccountInfo(
+                index=i,
+                name=str(item.get("name", "")),
+                phone=str(item.get("phone", "")),
+                password=str(item.get("password", "")),
+                start_lat=_native(item.get("start_lat")),
+                start_lng=_native(item.get("start_lng")),
+                target_distance_km=_native(item.get("target_distance_km")),
+                target_pace_min_per_km=_native(item.get("target_pace_min_per_km")),
+                skip_wait=_native(item.get("skip_wait")),
+                force_submit=_native(item.get("force_submit")),
+                ignore_target_met=_native(item.get("ignore_target_met")),
+                auto_run_enabled=bool(_native(item.get("auto_run_enabled", False))),
+                morning_time=str(item.get("morning_time", "06:30")),
+                normal_time=str(item.get("normal_time", "12:00")),
+                auto_run_jitter_minutes=int(
+                    _native(item.get("auto_run_jitter_minutes", 5)) or 5
+                ),
+            )
         )
     return result
 
@@ -122,6 +159,10 @@ def add_account(data: dict[str, Any]) -> str | None:
         "skip_wait",
         "force_submit",
         "ignore_target_met",
+        "auto_run_enabled",
+        "morning_time",
+        "normal_time",
+        "auto_run_jitter_minutes",
     ):
         val = getattr(account, key)
         if val is not None:
@@ -160,6 +201,10 @@ def update_account(index: int, data: dict[str, Any]) -> str | None:
         "skip_wait",
         "force_submit",
         "ignore_target_met",
+        "auto_run_enabled",
+        "morning_time",
+        "normal_time",
+        "auto_run_jitter_minutes",
     ):
         val = getattr(account, key)
         if val is not None:
@@ -212,7 +257,7 @@ def update_section(section: str, data: dict[str, Any]) -> str | None:
 
     try:
         model_instance = model_cls.model_validate(data)
-    except Exception as exc:
+    except ValidationError as exc:
         return f"Validation failed for [{section}]:\n- {_fmt_err(exc)}"
 
     doc, err = _read_document()

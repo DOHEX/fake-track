@@ -1,5 +1,7 @@
 """Web UI pages (NiceGUI)."""
 
+from typing import Any
+
 from nicegui import ui
 
 from fake_track.core.config_service import list_accounts
@@ -34,6 +36,23 @@ def dashboard() -> None:
         _build_nav()
         ui.label("Dashboard").classes("text-2xl font-semibold")
 
+        from fake_track.core.scheduler import scheduler as _sched
+
+        async def _toggle_scheduler(e: Any) -> None:
+            await _sched.set_enabled(e.value)
+
+        with ui.row().classes("items-center gap-3"):
+            toggle = ui.switch(
+                "Auto-Run Scheduler",
+                value=_sched.enabled,
+                on_change=_toggle_scheduler,
+            )
+            ui.label().bind_text_from(
+                toggle,
+                "value",
+                backward=lambda v: "Active — checking every 30s" if v else "Inactive",
+            ).classes("text-xs text-slate-500")
+
         if error:
             with ui.card().classes("bg-red-50 border border-red-200"):
                 ui.label(error).classes("text-sm text-red-700")
@@ -44,7 +63,7 @@ def dashboard() -> None:
                 "Add accounts in fake-track.toml or set environment variables."
             ).classes("text-sm text-slate-500 mt-4")
 
-        for account, settings in zip(accounts, settings_list):
+        for account, settings in zip(accounts, settings_list, strict=True):
             account_card(account, settings)
 
 
@@ -71,22 +90,22 @@ def accounts_page() -> None:
                             with ui.column().classes("gap-0.5"):
                                 with ui.row().classes("items-center gap-2"):
                                     ui.label(
-                                        a["name"] or f"account #{a['index'] + 1}"
+                                        a.name or f"account #{a.index + 1}"
                                     ).classes("text-base font-semibold text-slate-800")
-                                    ui.label(f"#{a['index'] + 1}").classes(
+                                    ui.label(f"#{a.index + 1}").classes(
                                         "text-xs text-slate-400"
                                     )
-                                ui.label(a["phone"]).classes("text-xs text-slate-500")
+                                ui.label(a.phone).classes("text-xs text-slate-500")
                                 track_hints: list[str] = []
-                                if a.get("start_lat") and a.get("start_lng"):
+                                if a.start_lat and a.start_lng:
                                     track_hints.append(
-                                        f"📍{a['start_lat']:.4f},{a['start_lng']:.4f}"
+                                        f"📍{a.start_lat:.4f},{a.start_lng:.4f}"
                                     )
-                                if a.get("target_distance_km"):
-                                    track_hints.append(f"🏃{a['target_distance_km']}km")
-                                if a.get("target_pace_min_per_km"):
+                                if a.target_distance_km:
+                                    track_hints.append(f"🏃{a.target_distance_km}km")
+                                if a.target_pace_min_per_km:
                                     track_hints.append(
-                                        f"⏱{a['target_pace_min_per_km']}min/km"
+                                        f"⏱{a.target_pace_min_per_km}min/km"
                                     )
                                 if track_hints:
                                     ui.label(" · ".join(track_hints)).classes(
@@ -97,14 +116,14 @@ def accounts_page() -> None:
                             with ui.row().classes("gap-1 ml-auto"):
                                 ui.button(
                                     icon="edit",
-                                    on_click=lambda a=a: open_account_dialog(
+                                    on_click=lambda _, a=a: open_account_dialog(
                                         "edit", a, _render_cards
                                     ),
                                 ).props("flat dense")
                                 ui.button(
                                     icon="delete",
                                     color="red",
-                                    on_click=lambda a=a: open_delete_dialog(
+                                    on_click=lambda _, a=a: open_delete_dialog(
                                         a, _render_cards
                                     ),
                                 ).props("flat dense")
@@ -125,8 +144,7 @@ def parameters_page() -> None:
                 "Run",
                 "run",
                 [
-                    ("start_lat", "Start Latitude", "number", float, "°"),
-                    ("start_lng", "Start Longitude", "number", float, "°"),
+                    ("start", "Start (GCJ02)", "coord", float, "°"),
                     ("target_distance_km", "Target Distance", "number", float, "km"),
                     (
                         "target_pace_min_per_km",
@@ -152,13 +170,6 @@ def parameters_page() -> None:
                     ("road_routing_enabled", "Road Routing", "switch", bool, ""),
                     ("road_map_path", "Map Path", "text", str, ""),
                     ("road_snap_max_m", "Snap Max Distance", "number", float, "m"),
-                    (
-                        "road_coordinate_bridge_enabled",
-                        "Coord Bridge",
-                        "switch",
-                        bool,
-                        "",
-                    ),
                 ],
             ),
             (
@@ -214,7 +225,7 @@ def parameters_page() -> None:
         ]
 
         with ui.tabs().classes("w-full") as tabs:
-            for label, key, _fields in tabs_config:
+            for label, _key, _fields in tabs_config:
                 ui.tab(label, icon="settings")
 
         with ui.tab_panels(tabs, value=tabs_config[0][0]).classes("w-full"):

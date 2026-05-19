@@ -57,19 +57,19 @@ jobs:
             exit 0
           fi
 
-          SUCCESS=$(jq -r '.success // false' run-report.json)
-          MODE=$(jq -r '.mode // "unknown"' run-report.json)
-          WARNING=$(jq -r '.warning // "-"' run-report.json)
-          RUN_TYPE=$(jq -r '.summary.run_type // "-"' run-report.json)
-          MORNING=$(jq -r '.summary.morning // "-"' run-report.json)
-          NORMAL=$(jq -r '.summary.normal // "-"' run-report.json)
-          TARGET_EFFECTIVE=$(jq -r '.summary.target_effective // "-"' run-report.json)
-          DISTANCE=$(jq -r '.summary.generated_distance_km // "-"' run-report.json)
-          DURATION=$(jq -r '.summary.generated_duration_sec // "-"' run-report.json)
-          BATCHES=$(jq -r '.summary.uploaded_batches // 0' run-report.json)
-          FORCE_SUBMIT=$(jq -r '.summary.generated_force_submit // false' run-report.json)
-          IGNORE_TARGET=$(jq -r '.summary.generated_ignore_target_met // false' run-report.json)
-          SKIP_REASON=$(jq -r '.summary.skip_reason // .summary.generated_ignored_target_skip_reason // "-"' run-report.json)
+          SUCCESS=$(jq -r '.report.success // false' run-report.json)
+          MODE=$(jq -r '.report.mode // "unknown"' run-report.json)
+          WARNING=$(jq -r '.report.warning // "-"' run-report.json)
+          RUN_TYPE=$(jq -r '.report.summary.run_type // "-"' run-report.json)
+          MORNING=$(jq -r '.report.summary.morning // "-"' run-report.json)
+          NORMAL=$(jq -r '.report.summary.normal // "-"' run-report.json)
+          TARGET_EFFECTIVE=$(jq -r '.report.summary.target_effective // "-"' run-report.json)
+          DISTANCE=$(jq -r '.report.summary.generated_distance_km // "-"' run-report.json)
+          DURATION=$(jq -r '.report.summary.generated_duration_sec // "-"' run-report.json)
+          BATCHES=$(jq -r '.report.summary.uploaded_batches // 0' run-report.json)
+          FORCE_SUBMIT=$(jq -r '.report.summary.generated_force_submit // false' run-report.json)
+          IGNORE_TARGET=$(jq -r '.report.summary.generated_ignore_target_met // false' run-report.json)
+          SKIP_REASON=$(jq -r '.report.summary.skip_reason // .report.summary.generated_ignored_target_skip_reason // "-"' run-report.json)
 
           echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"

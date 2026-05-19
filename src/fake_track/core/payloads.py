@@ -1,11 +1,11 @@
 from collections.abc import Sequence
 
-from .models import TrackBuildResult, TrackPoint
+from .models import GeneratedTrack, PassPoint, RunCounts, TrackPoint
 
 
 def build_run_summary_payload(
     record_id: int,
-    run_result: TrackBuildResult,
+    run_result: GeneratedTrack,
 ) -> dict[str, float | int | str]:
     mileage_m = round(run_result.distance_km * 1000)
     return {
@@ -38,3 +38,32 @@ def build_path_upload_payload(
         ],
         "path_image": "",
     }
+
+
+def build_counts_payload(student_id: int, counts_data: object) -> RunCounts:
+    from .client import ApiError
+
+    if not isinstance(counts_data, dict):
+        raise ApiError(
+            f"Run counts response data is not a dict: {type(counts_data).__name__}"
+        )
+    return RunCounts(
+        morning=int(counts_data.get("morning", 0)),
+        normal=int(counts_data.get("universal", 0)),
+        effective=int(counts_data.get("effective", 0)),
+        target_effective=int(counts_data.get("target_effective", 0)),
+    )
+
+
+def pass_points_to_dicts(points: Sequence[PassPoint]) -> list[dict[str, float]]:
+    return [{"lat": p.lat, "lng": p.lng} for p in points]
+
+
+def dicts_to_pass_points(items: list[dict]) -> list[PassPoint]:
+    result: list[PassPoint] = []
+    for item in items:
+        try:
+            result.append(PassPoint(lat=float(item["lat"]), lng=float(item["lng"])))
+        except KeyError, TypeError, ValueError:
+            continue
+    return result

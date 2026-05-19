@@ -8,6 +8,10 @@ name = "account-1"
 phone = ""
 password = ""
 # skip_wait = true       # optional per-account override
+# auto_run_enabled = true
+# morning_time = "06:25"
+# normal_time = "12:00"
+# auto_run_jitter_minutes = 5
 
 [[accounts]]
 name = "account-2"
@@ -15,6 +19,7 @@ phone = ""
 password = ""
 
 [run]
+# GCJ02 coordinates
 start_lat = 30.83378
 start_lng = 121.504532
 target_distance_km = 2.03
@@ -32,7 +37,6 @@ timestamp_jitter_ms = 220
 road_routing_enabled = true
 road_map_path = "map.osm"
 road_snap_max_m = 120.0
-road_coordinate_bridge_enabled = true
 
 [output]
 report_path = ""

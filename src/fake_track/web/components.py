@@ -1,36 +1,37 @@
 """Reusable NiceGUI components."""
 
+import json
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nicegui import run, ui
 
-from fake_track.core.client import CampusRunClient, get_authenticated_client
+from fake_track.core.client import CampusRunClient, ensure_authenticated_client
 from fake_track.core.config import Settings
 from fake_track.core.config_service import (
+    AccountInfo,
     add_account,
     delete_account,
     get_section,
     update_account,
     update_section,
 )
-from fake_track.core.models import RunType, classify_run_type
-from fake_track.core.utils import (
-    annotate_records,
-    build_counts_payload,
-    parse_record_dt,
-)
+from fake_track.core.geo import gcj02_to_wgs84, wgs84_to_gcj02
+from fake_track.core.models import RunCounts, RunType, classify_run_type
+from fake_track.core.payloads import build_counts_payload
+from fake_track.core.records import annotate_records, parse_record_dt
 from fake_track.core.workflow import RunExecutionOptions, RunWorkflow
-from fake_track.web.utils import OPTION_BADGES
+from fake_track.web.utils import OPTION_BADGES, AccountCard
 
 # -- option badges ------------------------------------------------------
 
 
-def option_badges(account: dict[str, Any]) -> None:
+def option_badges(account: AccountInfo | AccountCard) -> None:
     """Render skip_wait / force_submit / ignore_target_met badges for an account."""
     for key, color in OPTION_BADGES:
-        if account.get(key):
+        if getattr(account, key, None):
             ui.badge(key, color=color).classes("text-xs")
 
 
@@ -38,18 +39,18 @@ def option_badges(account: dict[str, Any]) -> None:
 
 
 def render_counts(
-    counts: dict[str, int | bool],
+    counts: RunCounts,
     container: ui.element,
     effective_label: ui.label | None = None,
     target_met_label: ui.label | None = None,
     today_status: dict[str, bool] | None = None,
 ) -> None:
     container.clear()
-    morning = counts["morning"]
-    normal = counts["normal"]
-    effective = counts["effective"]
-    target = counts["target_effective"]
-    target_met = counts["target_met"]
+    morning = counts.morning
+    normal = counts.normal
+    effective = counts.effective
+    target = counts.target_effective
+    target_met = target > 0 and effective >= target
 
     if effective_label is not None:
         effective_label.set_text(f"有效: {effective}")
@@ -101,41 +102,39 @@ def render_result(container: ui.element, report: dict[str, Any]) -> None:
     success = report.get("success", False)
     color = "emerald" if success else "red"
     label = "OK" if success else "FAILED"
-    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    summary: dict[str, Any] = (
+        report["summary"] if isinstance(report.get("summary"), dict) else {}
+    )
 
-    with container:
-        with ui.card().classes(f"bg-{color}-50 border border-{color}-200"):
-            with ui.row().classes("gap-2 items-center"):
-                ui.badge(label, color=color)
-                if report.get("record_id"):
-                    ui.label(f"#{report['record_id']}").classes(
-                        "text-xs text-slate-400"
-                    )
-                if report.get("warning"):
-                    ui.label(report["warning"]).classes("text-xs text-amber-700")
+    with container, ui.card().classes(f"bg-{color}-50 border border-{color}-200"):
+        with ui.row().classes("gap-2 items-center"):
+            ui.badge(label, color=color)
+            if report.get("record_id"):
+                ui.label(f"#{report['record_id']}").classes("text-xs text-slate-400")
+            if report.get("warning"):
+                ui.label(report["warning"]).classes("text-xs text-amber-700")
 
-            with ui.row().classes("gap-x-3 gap-y-0 mt-1 flex-wrap"):
-                dist = summary.get("generated_distance_km", 0)
-                pace = summary.get("generated_pace_min_per_km", 0)
-                dur = summary.get("generated_duration_sec", 0)
-                dur_str = f"{dur // 60}:{dur % 60:02d}"
-                ui.label(f"📏 {dist:.2f}km").classes("text-xs text-slate-600")
-                ui.label(f"⏱ {pace:.1f}min/km").classes("text-xs text-slate-600")
-                ui.label(f"🕐 {dur_str}").classes("text-xs text-slate-600")
-                met = summary.get("target_met", False)
-                tgt = summary.get("target_effective", 0)
-                if tgt:
-                    ui.label(f"{'✅' if met else '❌'} {tgt}").classes("text-xs")
+        with ui.row().classes("gap-x-3 gap-y-0 mt-1 flex-wrap"):
+            dist = summary.get("generated_distance_km", 0)
+            pace = summary.get("generated_pace_min_per_km", 0)
+            dur = summary.get("generated_duration_sec", 0)
+            dur_str = f"{dur // 60}:{dur % 60:02d}"
+            ui.label(f"📏 {dist:.2f}km").classes("text-xs text-slate-600")
+            ui.label(f"⏱ {pace:.1f}min/km").classes("text-xs text-slate-600")
+            ui.label(f"🕐 {dur_str}").classes("text-xs text-slate-600")
+            met = summary.get("target_met", False)
+            tgt = summary.get("target_effective", 0)
+            if tgt:
+                ui.label(f"{'✅' if met else '❌'} {tgt}").classes("text-xs")
 
-            with ui.expansion("Detail", icon="code").classes("mt-1"):
-                ui.code(str(report), language="json")
+        with ui.expansion("Detail", icon="code").classes("mt-1"):
+            ui.code(str(report), language="json")
 
 
 def render_error(container: ui.element, message: str) -> None:
     container.clear()
-    with container:
-        with ui.card().classes("bg-red-50 border border-red-200"):
-            ui.label(message).classes("text-sm text-red-700")
+    with container, ui.card().classes("bg-red-50 border border-red-200"):
+        ui.label(message).classes("text-sm text-red-700")
 
 
 # -- account card (dashboard) -------------------------------------------
@@ -185,6 +184,110 @@ def _build_record_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+async def _show_path_map(
+    client: CampusRunClient,
+    records: list[dict[str, Any]],
+    sel_state: dict[str, Any],
+) -> None:
+    rows = sel_state.get("rows", [])
+    if not rows:
+        ui.notification("Select a record first", type="warning", position="top")
+        return
+    record_id = str(rows[0].get("id", ""))
+    row_mileage = rows[0].get("mileage_km", "-")
+    row_start = rows[0].get("start_time", "-")
+
+    dlg = ui.dialog()
+    with dlg, ui.card().classes("min-w-[600px]"):
+        ui.label(f"Path for record #{record_id}").classes("text-lg font-semibold")
+        info_text = f"{row_mileage} · {row_start}"
+        ui.label(info_text).classes("text-xs text-slate-500 mb-1")
+        with ui.row():
+            ui.spinner(size="sm")
+            ui.label("Loading path...").classes("text-xs text-slate-400 ml-2")
+
+    try:
+        resp = await run.io_bound(client.fetch_path_points, int(record_id))
+        data = resp.data
+
+        # data is a list of upload batches, each with path_point as a JSON string.
+        # Combine points from all batches into one flat list.
+        raw_points: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            for batch in data:
+                if isinstance(batch, dict):
+                    pp = batch.get("path_point", [])
+                    if isinstance(pp, str):
+                        try:
+                            pp = json.loads(pp)
+                        except Exception:
+                            pp = []
+                    if isinstance(pp, list):
+                        raw_points.extend(pp)
+
+        if not raw_points:
+            dlg.clear()
+            with dlg, ui.card():
+                ui.label("No path data found").classes("text-sm text-slate-500")
+                ui.button("Close", on_click=dlg.close).classes("mt-2")
+            dlg.open()
+            return
+
+        coords: list[tuple[float, float]] = []
+        for p in raw_points:
+            if isinstance(p, dict):
+                lat = float(p.get("lat", 0) or 0)
+                lng = float(p.get("lng", 0) or 0)
+                if lat and lng:
+                    wgs_lat, wgs_lng = gcj02_to_wgs84(lat, lng)
+                    coords.append((wgs_lat, wgs_lng))
+
+        if len(coords) < 2:
+            dlg.clear()
+            with dlg, ui.card():
+                ui.label("Not enough path points").classes("text-sm text-slate-500")
+                ui.button("Close", on_click=dlg.close).classes("mt-2")
+            dlg.open()
+            return
+
+        mid = coords[len(coords) // 2]
+        dlg.clear()
+        with dlg, ui.card().classes("min-w-[600px]"):
+            ui.label(f"Path for record #{record_id}").classes("text-lg font-semibold")
+            info_text = f"{row_mileage} · {row_start} · {len(coords)} pts"
+            ui.label(info_text).classes("text-xs text-slate-500 mb-1")
+
+            m = ui.leaflet(center=mid, zoom=16).classes("w-full h-80")
+            m.generic_layer(
+                name="circleMarker",
+                args=[coords[0], {"color": "blue", "radius": 6, "fillOpacity": 1}],
+            )
+            m.generic_layer(
+                name="circleMarker",
+                args=[coords[-1], {"color": "red", "radius": 6, "fillOpacity": 1}],
+            )
+            # gradient polyline: blue → red
+            seg_count = len(coords) - 1
+            for i in range(seg_count):
+                ratio = i / max(seg_count, 1)
+                r = int(ratio * 255)
+                b = int((1 - ratio) * 255)
+                color = f"rgb({r},0,{b})"
+                m.generic_layer(
+                    name="polyline",
+                    args=[[coords[i], coords[i + 1]], {"color": color, "weight": 3}],
+                )
+
+            ui.button("Close", on_click=dlg.close).classes("mt-2")
+    except Exception as exc:
+        dlg.clear()
+        with dlg, ui.card():
+            ui.label(f"Error: {exc}").classes("text-sm text-red-600")
+            ui.button("Close", on_click=dlg.close).classes("mt-2")
+
+    dlg.open()
+
+
 async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
     dialog.clear()
     with dialog, ui.card().classes("min-w-[750px] max-w-[950px]"):
@@ -192,7 +295,7 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
         ui.label("Loading records...").classes("text-xs text-slate-400 ml-2")
 
     try:
-        client, _ = await run.io_bound(get_authenticated_client, settings)
+        client, _ = await run.io_bound(ensure_authenticated_client, settings)
 
         BATCH_SIZE = 100
         all_records: list[dict[str, Any]] = []
@@ -222,6 +325,13 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
                 out.append(r)
             return out
 
+        async def _view_path_for(row: dict[str, Any]) -> None:
+            await _show_path_map(
+                client,
+                records=all_records,
+                sel_state={"rows": [row]},
+            )
+
         def _render() -> None:
             nonlocal semesters
             filtered = _apply_filters()
@@ -249,7 +359,7 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
 
                 with ui.row().classes("gap-3 mt-2 items-center"):
                     ui.select(
-                        options=[""] + list(_RUN_TYPE_LABELS.keys()),
+                        options=["", *_RUN_TYPE_LABELS.keys()],
                         label="Run Type",
                         value=filter_state["run_type"],
                         on_change=lambda e: _on_filter("run_type", e.value or ""),
@@ -261,7 +371,7 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
                         on_change=lambda e: _on_filter("status", e.value or ""),
                     ).classes("w-28")
                     ui.select(
-                        options=[""] + semesters,
+                        options=["", *semesters],
                         label="Semester",
                         value=filter_state["semester"],
                         on_change=lambda e: _on_filter("semester", e.value or ""),
@@ -272,50 +382,53 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
                         "text-sm text-slate-500 mt-2"
                     )
                 else:
-                    columns = [
-                        {"name": "id", "label": "ID", "field": "id", "align": "left"},
-                        {
-                            "name": "start",
-                            "label": "Start",
-                            "field": "start_time",
-                            "align": "left",
-                        },
-                        {
-                            "name": "end",
-                            "label": "End",
-                            "field": "end_time",
-                            "align": "left",
-                        },
-                        {
-                            "name": "mileage",
-                            "label": "Distance",
-                            "field": "mileage_km",
-                            "align": "right",
-                        },
-                        {
-                            "name": "speed",
-                            "label": "Speed",
-                            "field": "speed",
-                            "align": "right",
-                        },
-                        {
-                            "name": "status",
-                            "label": "Status",
-                            "field": "status_label",
-                            "align": "left",
-                        },
-                        {
-                            "name": "type",
-                            "label": "Type",
-                            "field": "run_type",
-                            "align": "left",
-                        },
-                    ]
-                    ui.table(
-                        columns=columns,
-                        rows=_build_record_rows(page_records),
-                        row_key="id",
-                    ).classes("w-full")
+                    rows_data = _build_record_rows(page_records)
+                    # header
+                    with ui.row().classes(
+                        "w-full gap-1 py-1 border-b-2 border-slate-300 font-semibold"
+                    ):
+                        ui.label("ID").classes("w-16 text-xs text-slate-600")
+                        ui.label("Start").classes("w-36 text-xs text-slate-600")
+                        ui.label("End").classes("w-36 text-xs text-slate-600")
+                        ui.label("Distance").classes(
+                            "w-20 text-xs text-slate-600 text-right"
+                        )
+                        ui.label("Speed").classes(
+                            "w-16 text-xs text-slate-600 text-right"
+                        )
+                        ui.label("Status").classes("w-12 text-xs text-slate-600")
+                        ui.label("Type").classes("w-10 text-xs text-slate-600")
+                        ui.label("").classes("w-10")  # action
+                    # rows
+                    for r in rows_data:
+                        with ui.row().classes(
+                            "w-full gap-1 py-0.5 border-b border-slate-200 items-center"
+                        ):
+                            ui.label(str(r.get("id", ""))).classes("w-16 text-xs")
+                            ui.label(str(r.get("start_time", ""))).classes(
+                                "w-36 text-xs"
+                            )
+                            ui.label(str(r.get("end_time", ""))).classes("w-36 text-xs")
+                            ui.label(str(r.get("mileage_km", "-"))).classes(
+                                "w-20 text-xs text-right"
+                            )
+                            ui.label(str(r.get("speed", "-"))).classes(
+                                "w-16 text-xs text-right"
+                            )
+                            status = str(r.get("status_label", ""))
+                            status_color = (
+                                "text-emerald-600"
+                                if status == "达标"
+                                else "text-red-500"
+                            )
+                            ui.label(status).classes(f"w-12 text-xs {status_color}")
+                            ui.label(str(r.get("run_type", "-"))).classes(
+                                "w-10 text-xs"
+                            )
+                            ui.button(
+                                icon="map",
+                                on_click=lambda _, row=r: _view_path_for(row),
+                            ).props("flat dense size=xs").classes("w-10")
 
                 with ui.row().classes("gap-2 mt-4 items-center"):
                     ui.button(
@@ -388,16 +501,25 @@ async def open_records_dialog(settings: Settings, dialog: ui.dialog) -> None:
 # -- account card -------------------------------------------------------
 
 
-def account_card(account: dict[str, Any], settings: Settings) -> None:
+def account_card(account: AccountCard, settings: Settings) -> None:
     """Dashboard card for a single account."""
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2"):
-            ui.label(account["label"]).classes("text-lg font-semibold text-slate-800")
+            ui.label(account.label).classes("text-lg font-semibold text-slate-800")
             eff_label = ui.label("").classes("text-xs text-slate-500")
             eff_label.set_visibility(False)
             met_label = ui.label("").classes("text-xs font-medium")
             met_label.set_visibility(False)
             option_badges(account)
+            if account.auto_run_enabled:
+                from fake_track.core.scheduler import scheduler as _sched
+
+                ui.badge("auto", color="purple").classes("text-xs")
+                status = "active" if _sched.enabled else "paused"
+                ui.label(
+                    f"{account.morning_time} / {account.normal_time} "
+                    f"±{account.auto_run_jitter_minutes}m [{status}]"
+                ).classes("text-xs text-slate-400 ml-1")
 
         counts_container = ui.column().classes("mt-1")
         with counts_container:
@@ -414,15 +536,15 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
         ) -> None:
             try:
                 client, student_id = await run.io_bound(
-                    get_authenticated_client, _settings
+                    ensure_authenticated_client, _settings
                 )
                 resp = await run.io_bound(client.fetch_run_counts, student_id)
                 counts = build_counts_payload(student_id, resp.data)
                 today = await run.io_bound(_check_today_status, client)
                 render_counts(counts, _container, _eff, _met, today)
-                _last_counts["morning"] = counts["morning"]
-                _last_counts["normal"] = counts["normal"]
-                _last_counts["effective"] = counts["effective"]
+                _last_counts["morning"] = counts.morning
+                _last_counts["normal"] = counts.normal
+                _last_counts["effective"] = counts.effective
             except Exception as exc:
                 _container.clear()
                 with _container:
@@ -431,11 +553,9 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
         ui.timer(0.1, _fetch_counts, once=True)
 
         with ui.row().classes("gap-2 mt-1 items-center"):
-            chk_skip = ui.checkbox("skip wait", value=account["skip_wait"])
-            chk_force = ui.checkbox("force submit", value=account["force_submit"])
-            chk_ignore = ui.checkbox(
-                "ignore target", value=account["ignore_target_met"]
-            )
+            chk_skip = ui.checkbox("skip wait", value=account.skip_wait)
+            chk_force = ui.checkbox("force submit", value=account.force_submit)
+            chk_ignore = ui.checkbox("ignore target", value=account.ignore_target_met)
             chk_image = ui.checkbox("image", value=False)
 
         progress_container = ui.column().classes("mt-1 w-full")
@@ -445,7 +565,7 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
         progress_container.set_visibility(False)
         result_container = ui.column().classes("mt-1")
 
-        _step_pattern = __import__("re").compile(r"Step (\d+)/(\d+)")
+        _step_pattern = re.compile(r"Step (\d+)/(\d+)")
 
         def _on_progress(msg: str) -> None:
             m = _step_pattern.search(msg)
@@ -514,7 +634,7 @@ def account_card(account: dict[str, Any], settings: Settings) -> None:
             ui.button(
                 "Records",
                 icon="history",
-                on_click=lambda d=ui.dialog(): open_records_dialog(settings, d),
+                on_click=lambda _, d=ui.dialog(): open_records_dialog(settings, d),
             )
             ui.button("Run", icon="play_arrow", color="emerald", on_click=_run)
 
@@ -534,6 +654,10 @@ def _extract_account_form(
     inp_lng: ui.number | None = None,
     inp_dist: ui.number | None = None,
     inp_pace: ui.number | None = None,
+    sw_auto: ui.switch | None = None,
+    inp_morning: ui.input | None = None,
+    inp_normal: ui.input | None = None,
+    inp_jitter: ui.number | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "name": name_inp.value or None,
@@ -551,43 +675,56 @@ def _extract_account_form(
         data["target_distance_km"] = inp_dist.value if inp_dist.value else None
     if inp_pace is not None:
         data["target_pace_min_per_km"] = inp_pace.value if inp_pace.value else None
+    if sw_auto is not None:
+        data["auto_run_enabled"] = sw_auto.value
+    if inp_morning is not None:
+        data["morning_time"] = inp_morning.value or "06:30"
+    if inp_normal is not None:
+        data["normal_time"] = inp_normal.value or "12:00"
+    if inp_jitter is not None:
+        data["auto_run_jitter_minutes"] = int(inp_jitter.value or 5)
     return data
 
 
 async def _open_map_picker(lat_input: ui.number, lng_input: ui.number) -> None:
     """Open a Leaflet map dialog to pick coordinates."""
-    cur_lat = lat_input.value or 30.83378
-    cur_lng = lng_input.value or 121.504532
+    gcj_lat = lat_input.value or 30.83378
+    gcj_lng = lng_input.value or 121.504532
+    wgs_lat, wgs_lng = gcj02_to_wgs84(gcj_lat, gcj_lng)
 
     dlg = ui.dialog()
     with dlg, ui.card().classes("min-w-[550px]"):
         ui.label("Pick a location — drag marker or pan map").classes(
             "text-lg font-semibold"
         )
-        coord_label = ui.label(f"{cur_lat:.6f}, {cur_lng:.6f}").classes(
+        coord_label = ui.label(f"{gcj_lat:.6f}, {gcj_lng:.6f}").classes(
             "text-xs text-slate-500 mb-1"
         )
 
-        m = ui.leaflet(center=(cur_lat, cur_lng), zoom=17).classes("w-full h-96")
-        marker_obj = m.marker(latlng=(cur_lat, cur_lng))
+        m = ui.leaflet(center=(wgs_lat, wgs_lng), zoom=17).classes("w-full h-96")
+        marker_obj = m.marker(latlng=(wgs_lat, wgs_lng))
         marker_obj.draggable()
 
         def _on_move(e: Any) -> None:
             center = e.args["center"]
-            lat = float(center[0])
-            lng = float(center[1])
-            coord_label.set_text(f"{lat:.6f}, {lng:.6f}")
+            wgs_center_lat = float(center[0])
+            wgs_center_lng = float(center[1])
+            gcj_c_lat, gcj_c_lng = wgs84_to_gcj02(wgs_center_lat, wgs_center_lng)
+            coord_label.set_text(f"{gcj_c_lat:.6f}, {gcj_c_lng:.6f}")
 
         m.on("map-moveend", _on_move)
 
         async def _confirm() -> None:
             resp = await marker_obj.run_method("getLatLng", timeout=3)
             if isinstance(resp, dict):
-                lat_input.set_value(round(resp.get("lat", cur_lat), 6))
-                lng_input.set_value(round(resp.get("lng", cur_lng), 6))
+                lat, lng = wgs84_to_gcj02(
+                    resp.get("lat", gcj_lat), resp.get("lng", gcj_lng)
+                )
+                lat_input.set_value(round(lat, 6))
+                lng_input.set_value(round(lng, 6))
             else:
-                lat_input.set_value(cur_lat)
-                lng_input.set_value(cur_lng)
+                lat_input.set_value(gcj_lat)
+                lng_input.set_value(gcj_lng)
             dlg.close()
 
         with ui.row().classes("gap-2 mt-2"):
@@ -598,22 +735,19 @@ async def _open_map_picker(lat_input: ui.number, lng_input: ui.number) -> None:
 
 
 async def open_account_dialog(
-    mode: str, account: dict[str, Any] | None, on_saved: Any
+    mode: str, account: AccountInfo | AccountCard | None, on_saved: Any
 ) -> None:
     """Unified add/edit account dialog. mode is 'add' or 'edit'."""
     is_edit = mode == "edit"
-    title = f"Edit Account #{account['index'] + 1}" if is_edit else "Add Account"
+    account = cast(AccountInfo | AccountCard, account)
+    title = f"Edit Account #{account.index + 1}" if is_edit else "Add Account"
 
     dlg = ui.dialog()
     with dlg, ui.card().classes("min-w-[420px]"):
         ui.label(title).classes("text-lg font-semibold")
-        inp_name = ui.input(
-            "Name", value=(account.get("name") or "") if is_edit else ""
-        )
-        inp_phone = ui.input("Phone", value=account.get("phone", "") if is_edit else "")
-        inp_password = ui.input(
-            "Password", value=account.get("password", "") if is_edit else ""
-        )
+        inp_name = ui.input("Name", value=(account.name or "") if is_edit else "")
+        inp_phone = ui.input("Phone", value=account.phone if is_edit else "")
+        inp_password = ui.input("Password", value=account.password if is_edit else "")
 
         with ui.expansion("Personalized Track Params", icon="tune").classes("mt-1"):
             ui.label("Leave empty to use global defaults.").classes(
@@ -621,13 +755,13 @@ async def open_account_dialog(
             )
             with ui.row().classes("gap-2 items-end"):
                 inp_lat = ui.number(
-                    "start_lat",
-                    value=account.get("start_lat") if is_edit else None,
+                    "start_lat (GCJ02)",
+                    value=account.start_lat if is_edit else None,
                     format="%.6f",
                 ).classes("w-36")
                 inp_lng = ui.number(
-                    "start_lng",
-                    value=account.get("start_lng") if is_edit else None,
+                    "start_lng (GCJ02)",
+                    value=account.start_lng if is_edit else None,
                     format="%.6f",
                 ).classes("w-36")
                 ui.button(
@@ -636,26 +770,62 @@ async def open_account_dialog(
             with ui.row().classes("gap-2"):
                 inp_dist = ui.number(
                     "target_distance_km",
-                    value=account.get("target_distance_km") if is_edit else None,
+                    value=account.target_distance_km if is_edit else None,
                     format="%.2f",
                 ).classes("w-36")
                 inp_pace = ui.number(
                     "target_pace_min_per_km",
-                    value=account.get("target_pace_min_per_km") if is_edit else None,
+                    value=account.target_pace_min_per_km if is_edit else None,
                     format="%.2f",
                 ).classes("w-36")
 
         sw_skip = ui.switch(
-            "Skip Wait", value=bool(account.get("skip_wait")) if is_edit else False
+            "Skip Wait", value=bool(account.skip_wait) if is_edit else False
         )
         sw_force = ui.switch(
             "Force Submit",
-            value=bool(account.get("force_submit")) if is_edit else False,
+            value=bool(account.force_submit) if is_edit else False,
         )
         sw_ignore = ui.switch(
             "Ignore Target Met",
-            value=bool(account.get("ignore_target_met")) if is_edit else False,
+            value=bool(account.ignore_target_met) if is_edit else False,
         )
+
+        with ui.expansion("Auto-Run Scheduler", icon="schedule").classes("mt-1"):
+            ui.label("Schedule automated runs at preferred times each day.").classes(
+                "text-xs text-slate-400"
+            )
+            sw_auto = ui.switch(
+                "Enable Auto-Run",
+                value=bool(account.auto_run_enabled) if is_edit else False,
+            )
+            with ui.row().classes("gap-2 mt-1"):
+                inp_morning = ui.input(
+                    "Morning time (HH:MM)",
+                    value=account.morning_time if is_edit else "06:30",
+                    validation={
+                        "Must be 06:00-06:59": lambda v: bool(
+                            re.match(r"^06:[0-5]\d$", v)
+                        )
+                    },
+                ).classes("w-40")
+                inp_normal = ui.input(
+                    "Normal time (HH:MM)",
+                    value=account.normal_time if is_edit else "12:00",
+                    validation={
+                        "Must be 07:00-21:59": lambda v: bool(
+                            re.match(r"^(?:0[7-9]|1\d|2[0-1]):[0-5]\d$", v)
+                        )
+                    },
+                ).classes("w-40")
+            inp_jitter = ui.number(
+                "Jitter (±minutes)",
+                value=float(account.auto_run_jitter_minutes) if is_edit else 5.0,
+                min=0,
+                max=60,
+                step=1,
+                format="%.0f",
+            ).classes("w-32")
 
         async def _save() -> None:
             data = _extract_account_form(
@@ -669,9 +839,13 @@ async def open_account_dialog(
                 inp_lng=inp_lng,
                 inp_dist=inp_dist,
                 inp_pace=inp_pace,
+                sw_auto=sw_auto,
+                inp_morning=inp_morning,
+                inp_normal=inp_normal,
+                inp_jitter=inp_jitter,
             )
             if is_edit:
-                err = await run.io_bound(update_account, account["index"], data)
+                err = await run.io_bound(update_account, account.index, data)
             else:
                 err = await run.io_bound(add_account, data)
             if err:
@@ -684,6 +858,10 @@ async def open_account_dialog(
                 )
                 dlg.close()
                 on_saved()
+                # Resync scheduler after account changes
+                from fake_track.core.scheduler import scheduler as _sched
+
+                await _sched.resync()
 
         with ui.row().classes("gap-2 mt-4"):
             ui.button("Save", icon="save", on_click=_save)
@@ -691,13 +869,15 @@ async def open_account_dialog(
     dlg.open()
 
 
-async def open_delete_dialog(account: dict[str, Any], on_deleted: Any) -> None:
-    index = account["index"]
-    name = account["name"] or f"account #{index + 1}"
+async def open_delete_dialog(
+    account: AccountInfo | AccountCard, on_deleted: Any
+) -> None:
+    index = account.index
+    name = account.name or f"account #{index + 1}"
     dlg = ui.dialog()
     with dlg, ui.card():
         ui.label(f"Delete {name}?").classes("text-lg font-semibold")
-        ui.label(f"Phone: {account['phone']}").classes("text-sm text-slate-500")
+        ui.label(f"Phone: {account.phone}").classes("text-sm text-slate-500")
         ui.label("This cannot be undone.").classes("text-sm text-red-500 mt-1")
 
         async def _confirm() -> None:
@@ -708,6 +888,9 @@ async def open_delete_dialog(account: dict[str, Any], on_deleted: Any) -> None:
                 ui.notification("Account deleted", type="positive", position="top")
                 dlg.close()
                 on_deleted()
+                from fake_track.core.scheduler import scheduler as _sched
+
+                await _sched.resync()
 
         with ui.row().classes("gap-2 mt-4"):
             ui.button("Delete", icon="delete", color="red", on_click=_confirm)
@@ -728,11 +911,32 @@ def config_section_tab(
 
     with ui.column().classes("gap-2"):
         for fname, flabel, ftype, _ft, _funit in fields:
-            default = current.get(fname)
             unit_suffix = f" ({_funit})" if _funit else ""
             if ftype == "switch":
-                widgets[fname] = ui.switch(flabel, value=bool(default))
+                widgets[fname] = ui.switch(flabel, value=bool(current.get(fname)))
+            elif ftype == "coord":
+                lat_key = f"{fname}_lat"
+                lng_key = f"{fname}_lng"
+                ui.label(flabel + unit_suffix).classes("text-xs text-slate-500")
+                with ui.row().classes("gap-2 items-end"):
+                    widgets[lat_key] = ui.number(
+                        "lat",
+                        value=float(current.get(lat_key, 0.0) or 0),
+                        format="%.6f",
+                    ).classes("w-36")
+                    widgets[lng_key] = ui.number(
+                        "lng",
+                        value=float(current.get(lng_key, 0.0) or 0),
+                        format="%.6f",
+                    ).classes("w-36")
+                    ui.button(
+                        icon="map",
+                        on_click=lambda _, w=widgets, lk=lat_key, lk2=lng_key: (
+                            _open_map_picker(w[lk], w[lk2])
+                        ),
+                    ).props("flat dense").tooltip("Pick from map")
             elif ftype == "number":
+                default = current.get(fname)
                 decimals = 5 if isinstance(default, float) else 0
                 widgets[fname] = ui.number(
                     flabel + unit_suffix,
@@ -742,7 +946,9 @@ def config_section_tab(
             else:
                 widgets[fname] = ui.input(
                     flabel + unit_suffix,
-                    value=str(default) if default is not None else "",
+                    value=str(current.get(fname))
+                    if current.get(fname) is not None
+                    else "",
                 )
 
         async def _save(
@@ -752,6 +958,11 @@ def config_section_tab(
             for fname, _flabel, ftype, _ft, _funit in _fields:
                 if ftype == "switch":
                     data[fname] = _w[fname].value
+                elif ftype == "coord":
+                    for suffix in ("_lat", "_lng"):
+                        key_name = f"{fname}{suffix}"
+                        val = _w[key_name].value
+                        data[key_name] = float(val) if val is not None else 0.0
                 elif ftype == "number":
                     data[fname] = (
                         _ft(_w[fname].value)

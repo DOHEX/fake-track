@@ -1,6 +1,6 @@
 [project]
 name = "fake-track"
-version = "1.3.0"
+version = "1.4.0"
 description = "校园跑接口调试工具"
 readme = "README.md"
 authors = [
@@ -17,6 +17,7 @@ dependencies = [
     "typer>=0.25.1",
     "matplotlib>=3.10.9",
     "nicegui>=3.12.0",
+    "apscheduler>=4.0.0a6",
     "tomlkit>=0.15.0",
 ]
 
@@ -28,10 +29,20 @@ requires = ["uv_build>=0.11.2,<0.12"]
 build-backend = "uv_build"
 
 [tool.ruff.lint]
-select = ["I"]
+select = ["I", "E", "W", "F", "B", "UP", "SIM", "RUF", "C4", "PIE"]
+ignore = ["E501", "SIM102"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/fake_track/web/*" = ["B008", "SIM117"]
+"src/fake_track/cli/*" = ["B008"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
 
 [dependency-groups]
 dev = [
     "prek>=0.3.13",
-    "ruff>=0.15.12",
+    "ruff>=0.15.13",
+    "pyright>=1.1.400",
 ]
