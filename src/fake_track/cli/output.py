@@ -249,11 +249,9 @@ def _print_multi_run_summary(results: list[Any]) -> None:
 
 
 def _write_report_file(report: RunReport, report_path: Path) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    from fake_track.core.report import write_report_file
+
+    write_report_file(report, str(report_path))
 
 
 def _try_write_error_report(report_path: Path | None, message: str) -> None:
