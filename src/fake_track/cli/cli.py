@@ -235,9 +235,23 @@ def serve(
     port: int = typer.Option(8000, "--port", help="Port to listen on."),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload."),
     log_level: str = typer.Option("info", "--log-level", help="Uvicorn log level."),
+    on_air: str | None = typer.Option(
+        None,
+        "--on-air",
+        help="Share via NiceGUI On Air. Pass a token for a fixed URL, or 'true' for a random 1-hour URL.",
+    ),
 ) -> None:
     """Start the local web UI."""
-    run_web_server(host=host, port=port, reload=reload, log_level=log_level)
+    on_air_value: str | bool | None = (
+        True if on_air and on_air.lower() == "true" else on_air
+    )
+    run_web_server(
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level,
+        on_air=on_air_value,
+    )
 
 
 @app.command("run")

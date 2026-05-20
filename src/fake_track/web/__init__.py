@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fake_track.web import pages  # noqa: F401 — triggers @ui.page registration
 
 
@@ -57,11 +59,21 @@ def serve(
     port: int = 8000,
     reload: bool = False,
     log_level: str = "info",
+    on_air: str | Literal[True] | None = None,
 ) -> None:
     """Start the NiceGUI web server."""
     from nicegui import ui
 
+    from fake_track.core.config import OnAirSettings
+
     _wire_scheduler()
+
+    if on_air is None:
+        env_val = OnAirSettings().on_air
+        if env_val and env_val.strip().lower() in ("true", "1"):
+            on_air = True
+        else:
+            on_air = env_val
 
     ui.run(
         host=host,
@@ -69,4 +81,5 @@ def serve(
         reload=reload,
         title="fake-track",
         uvicorn_logging_level=log_level,
+        on_air=on_air,
     )

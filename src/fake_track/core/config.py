@@ -90,6 +90,21 @@ class CryptoSettings(BaseSettings):
             ) from exc
 
 
+class OnAirSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.local"),
+        env_file_encoding="utf-8",
+        env_ignore_empty=True,
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    on_air: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FAKE_TRACK_ON_AIR", "NICEGUI_ON_AIR"),
+    )
+
+
 class CredentialSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
