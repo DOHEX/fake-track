@@ -521,6 +521,39 @@ def account_card(account: AccountCard, settings: Settings) -> None:
                     f"±{account.auto_run_jitter_minutes}m [{status}]"
                 ).classes("text-xs text-slate-400 ml-1")
 
+                next_label = ui.label("").classes("text-xs text-slate-500 ml-1")
+
+                async def _fetch_next(
+                    _label: ui.label = next_label,
+                    _idx: int = account.index,
+                ) -> None:
+                    schedules = await _sched.get_next_fire_times()
+                    # scheduler index is 0-based; AccountCard index is 1-based.
+                    parts: list[str] = []
+                    for s in schedules:
+                        if s.get("index") == _idx - 1:
+                            run_type = str(s.get("run_type", ""))
+                            nft = s.get("next_fire_time")
+                            paused = s.get("paused", False)
+                            label_map = {"morning": "晨跑", "normal": "普跑"}
+                            label = label_map.get(run_type, run_type)
+                            if paused or not _sched.enabled:
+                                parts.append(f"{label} — (paused)")
+                            elif nft is not None:
+                                from datetime import datetime
+
+                                if isinstance(nft, datetime):
+                                    parts.append(
+                                        f"{label} — {nft.strftime('%H:%M:%S')}"
+                                    )
+                                else:
+                                    parts.append(f"{label} — {nft}")
+                            else:
+                                parts.append(f"{label} — —")
+                    _label.set_text(" | ".join(parts) if parts else "")
+
+                ui.timer(0.2, _fetch_next, once=True)
+
         counts_container = ui.column().classes("mt-1")
         with counts_container:
             ui.spinner(size="sm")

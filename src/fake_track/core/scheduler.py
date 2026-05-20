@@ -85,6 +85,38 @@ class AutoRunScheduler:
                     await self._scheduler.pause_schedule(sched_id)
             _logger.info("Auto-run scheduler disabled")
 
+    async def get_next_fire_times(self) -> list[dict[str, object]]:
+        """Return next-fire info for every auto-run schedule.
+
+        Each dict: ``{index, run_type, next_fire_time, paused}``.
+        """
+        if self._scheduler is None:
+            return []
+        results: list[dict[str, object]] = []
+        for sched in await self._scheduler.get_schedules():
+            sid: str | None = getattr(sched, "id", None)
+            if not isinstance(sid, str) or not sid.startswith(_JOB_ID_PREFIX):
+                continue
+            # ft_auto_{idx}_{run_type}
+            parts = sid[len(_JOB_ID_PREFIX) + 1 :].rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            idx_str, run_type = parts
+            try:
+                index = int(idx_str)
+            except ValueError:
+                continue
+            results.append(
+                {
+                    "index": index,
+                    "run_type": run_type,
+                    "next_fire_time": getattr(sched, "next_fire_time", None),
+                    "paused": getattr(sched, "paused", False),
+                }
+            )
+        results.sort(key=lambda x: (x.get("index"), x.get("run_type")))
+        return results
+
     async def resync(self) -> None:
         """Reconcile schedules with current config. Call after account changes."""
         if not self._enabled or self._scheduler is None:
