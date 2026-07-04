@@ -1,6 +1,6 @@
 # fake-track
 
-校园跑接口调试工具。按小程序接口顺序执行登录、建单、检查、提交和轨迹上传，支持路网生成轨迹、WGS84/GCJ02 坐标转换，以及 Web 控制台。
+某神秘海湾大学的校园跑接口调试工具。按小程序接口顺序执行登录、建单、检查、提交和轨迹上传，支持路网生成轨迹、WGS84/GCJ02 坐标转换，以及 Web 控制台。
 
 > [!IMPORTANT]
 > 本项目仅用于接口调试、协议分析和研究学习。请遵守学校与平台规则。
@@ -25,28 +25,28 @@ FAKE_TRACK_PASSWORD= # 密码
 
 ## CLI 命令
 
-| 命令 | 用途 |
-|------|------|
-| `run` | 执行一次完整跑步测试 |
-| `counts` | 查看晨跑、普通跑、有效次数 |
-| `recordlist` | 查看跑步记录列表，支持筛选 |
-| `encrypt TEXT` | 使用小程序同格式输出密文 |
-| `serve` | 启动 Web 控制台 |
+| 命令             | 用途                       |
+| ---------------- | -------------------------- |
+| `run`          | 执行一次完整跑步测试       |
+| `counts`       | 查看晨跑、普通跑、有效次数 |
+| `recordlist`   | 查看跑步记录列表，支持筛选 |
+| `encrypt TEXT` | 使用小程序同格式输出密文   |
+| `serve`        | 启动 Web 控制台            |
 
 ### 常用参数
 
-| 参数 | 命令 | 说明 |
-|------|------|------|
-| `--account NAME_OR_INDEX` | `run`, `counts`, `recordlist` | 选择账号，可重复传入 |
-| `--json-output` | `run`, `counts`, `recordlist` | 输出 JSON |
-| `--skip-wait` | `run` | 跳过模拟跑步等待 |
-| `--force-submit` | `run` | checkRecord 不通过仍继续提交 |
-| `--ignore-target-met` | `run` | 已达到目标次数仍继续跑 |
-| `--run-type morning\|normal` | `recordlist` | 按晨跑/普跑筛选 |
-| `--status valid\|invalid` | `recordlist` | 按有效/无效筛选 |
-| `--semester TEXT` | `recordlist` | 按学期筛选，如 `"2025-2026 第二学期"` |
-| `--track-image` | `run` | 输出轨迹叠加图 |
-| `--report-path PATH` | `run` | 额外写 JSON 报告到文件 |
+| 参数                          | 命令                                | 说明                                   |
+| ----------------------------- | ----------------------------------- | -------------------------------------- |
+| `--account NAME_OR_INDEX`   | `run`, `counts`, `recordlist` | 选择账号，可重复传入                   |
+| `--json-output`             | `run`, `counts`, `recordlist` | 输出 JSON                              |
+| `--skip-wait`               | `run`                             | 跳过模拟跑步等待                       |
+| `--force-submit`            | `run`                             | checkRecord 不通过仍继续提交           |
+| `--ignore-target-met`       | `run`                             | 已达到目标次数仍继续跑                 |
+| `--run-type morning\|normal` | `recordlist`                      | 按晨跑/普跑筛选                        |
+| `--status valid\|invalid`    | `recordlist`                      | 按有效/无效筛选                        |
+| `--semester TEXT`           | `recordlist`                      | 按学期筛选，如`"2025-2026 第二学期"` |
+| `--track-image`             | `run`                             | 输出轨迹叠加图                         |
+| `--report-path PATH`        | `run`                             | 额外写 JSON 报告到文件                 |
 
 `encrypt` 只需要 `FAKE_TRACK_KEY`，不要求手机号和密码。
 
@@ -62,12 +62,12 @@ uv run fake-track serve
 
 ### 环境变量
 
-| 变量 | 说明 |
-|------|------|
-| `FAKE_TRACK_KEY` | AES 密钥（兼容旧名 `FAKE_TRACK_SECRET`） |
-| `FAKE_TRACK_PHONE` | 手机号（多账号时可省略） |
-| `FAKE_TRACK_PASSWORD` | 密码（多账号时可省略） |
-| `FAKE_TRACK_IGNORE_TARGET_MET` | 等价 `--ignore-target-met`，接受 `1/true/yes/on` |
+| 变量                             | 说明                                                |
+| -------------------------------- | --------------------------------------------------- |
+| `FAKE_TRACK_KEY`               | AES 密钥（兼容旧名`FAKE_TRACK_SECRET`）           |
+| `FAKE_TRACK_PHONE`             | 手机号（多账号时可省略）                            |
+| `FAKE_TRACK_PASSWORD`          | 密码（多账号时可省略）                              |
+| `FAKE_TRACK_IGNORE_TARGET_MET` | 等价`--ignore-target-met`，接受 `1/true/yes/on` |
 
 ### TOML 配置
 
@@ -79,22 +79,60 @@ copy fake-track.example.toml fake-track.toml
 
 主要配置项：
 
-| Section | 字段 | 说明 |
-|---------|------|------|
-| `[run]` | `start_lat`, `start_lng` | 起点坐标 (GCJ02) |
-| `[run]` | `target_distance_km`, `target_pace_min_per_km` | 目标距离和配速 |
-| `[route]` | `road_routing_enabled`, `road_map_path` | 路网开关和 OSM 路径 |
-| `[output]` | `report_path` | JSON 报告输出路径 |
-| `[[accounts]]` | `name`, `phone`, `password` | 多账号配置 |
+| Section          | 字段                                               | 说明                |
+| ---------------- | -------------------------------------------------- | ------------------- |
+| `[run]`        | `start_lat`, `start_lng`                       | 起点坐标 (GCJ02)    |
+| `[run]`        | `target_distance_km`, `target_pace_min_per_km` | 目标距离和配速      |
+| `[route]`      | `road_routing_enabled`, `road_map_path`        | 路网开关和 OSM 路径 |
+| `[output]`     | `report_path`                                    | JSON 报告输出路径   |
+| `[[accounts]]` | `name`, `phone`, `password`                  | 多账号配置          |
 
 内部计算使用 WGS84, 配置/接口输入输出使用 GCJ02.
 
 详见 [fake-track.example.toml](fake-track.example.toml)。
 
-## GitHub Actions
+## 自动跑步
+
+### GitHub Actions
 
 [Daily Campus Run](.github/workflows/daily-run.yml) 每天 06:05（晨跑）和 14:00（普跑）自动运行，也支持手动触发。
 
 需配置 Secrets：`FAKE_TRACK_KEY`、`FAKE_TRACK_PHONE`、`FAKE_TRACK_PASSWORD`。
 
 可选 Variables：`FAKE_TRACK_IGNORE_TARGET_MET`。
+
+> [!NOTE]
+> GitHub Actions 的定时触发存在较大延迟（通常晚 10-30 分钟，高峰期可达 1 小时），实际执行时刻不可精确控制。
+
+### 系统 Cron
+
+适合 VPS / NAS / 树莓派等常驻机器，直接由系统定时任务触发：
+
+```cron
+# 晨跑 06:05
+5 6 * * * cd /path/to/fake-track && uv run fake-track run --report-path run-report.json >> cron.log 2>&1
+# 普跑 14:00
+0 14 * * * cd /path/to/fake-track && uv run fake-track run --report-path run-report.json >> cron.log 2>&1
+```
+
+多账号可通过 `--account` 分别配置，或每条 cron 线只跑一个账号。
+
+### Web 控制台调度器
+
+> [!WARNING]
+> 此功能未经完整测试，使用前请自行验证。
+
+启动 Web 控制台后，可在 `fake-track.toml` 的 `[[accounts]]` 下为每个账号配置独立定时任务：
+
+```toml
+[[accounts]]
+name = "account-1"
+phone = "13800138000"
+password = "your-password"
+auto_run_enabled = true
+morning_time = "06:25"
+normal_time = "12:00"
+auto_run_jitter_minutes = 5
+```
+
+`morning_time` / `normal_time` 分别控制晨跑和普跑的触发时刻，`auto_run_jitter_minutes` 在整点基础上加随机偏移（避免过于规律）。启动后调度器自动生效，仪表板可查看下次触发时间。
